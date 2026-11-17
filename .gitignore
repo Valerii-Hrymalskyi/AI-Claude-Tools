@@ -1,0 +1,13 @@
+# Portable Python: installed by python_setup.bat / python_setup.ps1, never committed
+Utils/Bin/
+# Leftovers of an interrupted or still-locked Python replacement
+*.setup/
+*.old/
+
+# Python
+__pycache__/
+*.pyc
+
+# Scratch
+*.tmp
+tests/.tmp/

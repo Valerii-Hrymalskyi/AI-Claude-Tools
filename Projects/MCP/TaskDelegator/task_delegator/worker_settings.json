@@ -1,0 +1,6 @@
+{
+  "enableWorkflows": true,
+  "permissions": {
+    "allow": ["Workflow"]
+  }
+}
