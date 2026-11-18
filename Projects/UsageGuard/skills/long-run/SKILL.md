@@ -1,6 +1,6 @@
 ---
 name: long-run
-description: Carry a task across a usage limit — checkpoint, wait out the reset for free, resume by itself. This is the default behaviour on every task, not a mode: use it the moment the usage guard denies a tool or reports PAUSE, whenever a task will obviously outlast the current window, and whenever the user steps away ("я спать", "продолжай сам"). Also covers cancelling an armed auto-resume.
+description: Carry a task across a usage limit — checkpoint, wait out the reset for free, resume by itself. This is the default behaviour on every task, not a mode: use it the moment the usage guard denies a tool or reports PAUSE, whenever a task will obviously outlast the current window, and whenever the user steps away ("я спать", "продолжай сам"). Also covers cancelling an armed auto-resume and pausing a headless run (`claude -p`, a TaskDelegator agent), which must not wait but hand back to its lead.
 ---
 
 # Carrying a task across a usage limit
@@ -79,10 +79,13 @@ stamped with this dialog's session id. Copy it from there rather than
 reconstructing it. Otherwise fill in `<python>`, `<guard>` and `<tag>` yourself.
 
 1. **Write the checkpoint.** Where you stopped, what is next, anything learned
-   that is not yet in a file. This is the only thing that survives. A bench run
-   through the HanpuRemoteControl service still going: its command, the tab or
-   task it runs in, when the lease was granted and when it should end. Leave
-   the run alone — killing it leaves the output on for up to 30 s.
+   that is not yet in a file. This is the only thing that survives. Anything
+   you started that is still running outside this conversation — a test run,
+   a build, a flash, a hardware session in a terminal tab: its command, where
+   it runs, when it should end. Leave it alone: killing a run half-way can
+   leave hardware or files in a worse state than letting it finish. If the
+   project has its own rules for such runs (its `CLAUDE.md` and the documents
+   it points to), they come first.
 2. **Arm the waiter.** It is a plain background process — waiting costs zero
    tokens, unlike a polling loop:
 
@@ -117,14 +120,35 @@ outward-facing — a push, a force-push, a delete, anything leaving the machine 
 still waits for the user, exactly as it would have before the pause. "Continue
 without asking" is about the pause, not about the guardrails.
 
-**A bench run is never started or repeated on resume without the owner's fresh
-go** (owner, 2026-11-08). The service's bench is the meter's only supply, and
-its consent is per run: a go given before the pause, a line in the checkpoint
-or the journal is not one. On resume first read what the run left — its output,
-its exit code, `-Cmd status` (holder, `output live`) — and report it; the next
-run, or a repeat of one that failed, was cut off or got a 426, waits for a new
-"yes". Before that, re-read the service's `USAGE.md` at the path a fresh
-`-Cmd status` prints (in EMFW-DLMS: `AI/Claude/context/bench-service.md`).
+**Consent does not survive a pause.** Whatever needed the user's go before it
+started — a run on hardware, a flash, a deploy, a write outside the project —
+is neither started nor repeated on resume on the strength of a go given before
+the pause, a line in the checkpoint or a journal entry. First read what the
+interrupted run left — its output, its exit code, the state of what it drove —
+and report it; the next run, or a repeat of one that failed or was cut off,
+waits for a fresh "yes". Re-read the project's own rules for such runs before
+asking: a project may say more than this skill does.
+
+## Running headless (no user, e.g. a TaskDelegator agent)
+
+You are headless when you run as `claude -p` with nobody on the other end —
+typically as an agent of the TaskDelegator MCP server, briefed by a lead Claude
+session: the first message is a self-contained brief, there are no earlier
+user turns, and `Monitor` is not available. Nothing can wake you: the run ends
+with your turn and takes any waiter with it. So on PAUSE:
+
+1. **Write the checkpoint** as above, under `.claude/tmp/long-run/` of the
+   working directory. In a read-only job you cannot write files: put the
+   checkpoint's content into the answer instead.
+2. **Do not arm the waiter.**
+3. **End the turn with one last line**, for the lead to act on:
+   `PAUSED: 5h <percent>, resets at <time>; checkpoint: <path or "in this answer">; next: <the exact next step>`.
+
+Whoever started the run resumes it in the same session after the reset: a lead
+Claude with `task_reply`, a script or a person with `claude -p --resume <session>`.
+Then do what "On resume" says: re-check `-mode status`, re-read the checkpoint,
+continue from the exact next step. The same goes for a 7-day block, except that
+the line says so and the lead decides.
 
 ## Cancelling an armed auto-resume
 
