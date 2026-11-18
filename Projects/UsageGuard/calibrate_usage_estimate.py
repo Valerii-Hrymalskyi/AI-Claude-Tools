@@ -24,7 +24,7 @@ window.
 Inside its own project it overshoots instead. It is wrong in both directions and
 no constant fixes that.
 
-    E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe E:/Development/AI/Claude/Projects/UsageGuard/calibrate_usage_estimate.py
+    <clone>/Utils/Bin/Windows/Python3/python.exe <clone>/Projects/UsageGuard/calibrate_usage_estimate.py
 """
 import os
 import sys

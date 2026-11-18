@@ -30,9 +30,16 @@ DEFAULT_ULTRACODE = os.environ.get("TASK_DELEGATOR_WORKER_ULTRACODE", "1") not i
 
 # Tools B may use. In read-only mode nothing that can change files or run commands.
 READ_TOOLS = ["Read", "Grep", "Glob", "WebSearch", "WebFetch", "TodoWrite"]
-WRITE_EXTRA = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]
-READ_ONLY_DENY = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]
-EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+EDIT_EXTRA = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+WRITE_EXTRA = [*EDIT_EXTRA, "Bash"]
+SHELL_TOOLS = ["Bash", "PowerShell"]
+READ_ONLY_DENY = [*EDIT_EXTRA, *SHELL_TOOLS]
+EDIT_TOOLS = set(EDIT_EXTRA)
+
+# Permission rules denied to write jobs that do have a shell (semicolon-separated, "" = none).
+# A guard against accidents, not a sandbox: B still runs with the user's Windows rights.
+WRITE_DENY = [r.strip() for r in os.environ.get("TASK_DELEGATOR_WORKER_DENY", "Bash(git push:*)").split(";")
+              if r.strip()]
 
 # Inherited env vars that must not reach B: they belong to the lead session or its account.
 _SCRUB_PREFIXES = ("CLAUDE", "ANTHROPIC", "MCP_")
@@ -94,15 +101,20 @@ def auth_status(exe: str) -> dict:
 
 def build_argv(exe: str, mode: str, model: str | None, effort: str | None,
                add_dirs: list[str] | None, max_turns: int | None, resume_session: str | None,
-               ultracode: bool = False) -> list[str]:
+               ultracode: bool = False, shell: bool = True) -> list[str]:
     """ultracode (write mode only): `--effort ultracode` turns it on for the run and implies xhigh.
-    The "ultracode" keyword inside a -p prompt does nothing: it only triggers on human-typed prompts."""
+    The "ultracode" keyword inside a -p prompt does nothing: it only triggers on human-typed prompts.
+    shell (write mode only): False leaves B file edits only, no Bash/PowerShell."""
     ultracode = ultracode and mode == "write"
     argv = [exe, "-p", "--output-format", "stream-json", "--verbose"]
     if mode == "write":
         # acceptEdits: edits are auto-approved only inside the working dirs (cwd + --add-dir);
         # anything else that would need a prompt is denied in headless mode.
-        argv += ["--permission-mode", "acceptEdits", "--allowedTools", *READ_TOOLS, *WRITE_EXTRA]
+        tools = [*READ_TOOLS, *(WRITE_EXTRA if shell else EDIT_EXTRA)]
+        argv += ["--permission-mode", "acceptEdits", "--allowedTools", *tools]
+        deny = WRITE_DENY if shell else SHELL_TOOLS  # deny rules win over allow rules
+        if deny:
+            argv += ["--disallowedTools", *deny]
     else:
         # dontAsk: whatever is not explicitly allowed is denied instead of prompting.
         argv += ["--permission-mode", "dontAsk", "--allowedTools", *READ_TOOLS,

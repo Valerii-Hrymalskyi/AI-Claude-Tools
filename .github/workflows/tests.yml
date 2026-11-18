@@ -1,0 +1,30 @@
+# Offline tests only: no Codex, no Claude account, no quota spent.
+# The end-to-end smoke tests (tests/smoke_test.py) need real logins and are run by hand.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell   # Windows PowerShell 5.1, as on the users' machines
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Portable Python (pinned version, SHA-256 checked) and packages
+        run: .\python_setup.ps1
+
+      - name: TaskDelegator unit tests
+        run: .\Utils\Bin\Windows\Python3\python.exe Projects\MCP\TaskDelegator\tests\unit_test.py
+
+      - name: UsageGuard self-test
+        run: .\Utils\Bin\Windows\Python3\python.exe Projects\UsageGuard\verify_usage_guard.py

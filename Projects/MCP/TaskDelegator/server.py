@@ -1,9 +1,9 @@
 """TaskDelegator MCP server (stdio), registered in Claude Code as "task-delegator".
 
-Exposes other AI agents as tools for Claude. Today: Codex CLI.
+Exposes other AI agents as tools for Claude: Codex CLI and worker B (a second Claude Code account).
 Run with the project's portable Python:
 
-    E:\\Development\\AI\\Claude\\Utils\\Bin\\Windows\\Python3\\python.exe server.py
+    <clone>\\Utils\\Bin\\Windows\\Python3\\python.exe server.py
 """
 
 from __future__ import annotations
@@ -43,7 +43,8 @@ WAIT_MAX_SEC = 600
 POLL_SEC = 2.0
 
 INSTRUCTIONS = """\
-TaskDelegator lets you (Claude) delegate work to other AI agents running on this PC. Today: OpenAI Codex.
+TaskDelegator lets you (Claude) delegate work to other AI agents running on this PC: OpenAI Codex
+(codex_* tools) and worker B, headless Claude Code on a second Claude account (worker_* tools).
 
 Treat Codex as a capable subordinate, not an oracle:
 - Give it a complete, self-contained brief: goal, relevant paths, constraints, what "done" looks like,
@@ -65,14 +66,18 @@ Codex has rate limits (a 5-hour and a weekly window). Plan around them:
 - A finished job reports limits_cost (approximate percentage points per window); use it to
   estimate what similar jobs will cost.
 
-Model and effort: always pass both explicitly (the user's Codex default is old and very expensive).
-- simple question / mechanical edit with exact instructions: gpt-6-luna, low
-- ordinary well-scoped task (a test, small feature, known bug, small review): gpt-6.1-sol, low-medium
-- multi-file change, unclear bug, large review, architecture: gpt-6.1-sol, high
-- hardest, high-stakes work: gpt-6-astra, high-xhigh
-- max / ultra only when the user asks; in "warn" stay at medium or below and avoid gpt-6-astra.
-delegator_doctor lists the models and the efforts each supports. If the user has a delegation policy
-(e.g. in their CLAUDE.md), it takes precedence over these defaults.
+Model and effort: always pass both explicitly. Otherwise Codex falls back to the model and effort
+of the user's Codex config, which may be slow or expensive. Pick the cheapest pair that fits:
+- simple question / mechanical edit with exact instructions: a small fast model, low
+- ordinary well-scoped task (a test, small feature, known bug, small review): a general model, low-medium
+- multi-file change, unclear bug, large review, architecture: a general model, high
+- hardest, high-stakes work: the strongest model, high-xhigh
+- max / ultra only when the user asks; in "warn" stay at medium or below and avoid the strongest model.
+delegator_doctor lists the models with their descriptions and the efforts each supports. If the user
+has a delegation policy (e.g. in their CLAUDE.md), it takes precedence over these defaults.
+
+Two write jobs in overlapping folders can overwrite each other's edits: a start result with a
+"warning" names the other running write job. Split the files between them or wait for it.
 """
 
 mcp = MCPServer(name="task-delegator", version=__version__, instructions=INSTRUCTIONS)
@@ -162,6 +167,43 @@ def _check_capacity() -> None:
         )
 
 
+def _write_conflicts(roots: list[str]) -> list[str]:
+    """Running write jobs (Codex or worker B) whose cwd/add_dirs overlap these folders.
+
+    Only a warning: parallel jobs in one repository are fine as long as they edit different files,
+    which the server cannot know in advance.
+    """
+    def norm(p: str) -> Path:
+        # add_dirs are stored as given: fold "..", "." and separators before comparing.
+        return Path(os.path.abspath(p))
+
+    mine = [norm(r) for r in roots if r]
+    found = []
+    for provider in (codex.PROVIDER, claude_worker.PROVIDER):
+        for jid in jobs.list_job_ids(provider, limit=50):
+            try:
+                meta = jobs.load_meta(jid)
+            except (KeyError, ValueError, OSError):
+                continue
+            if meta.get("mode") != "write" or meta.get("cancel_requested") or not jobs.is_running(jid, meta):
+                continue
+            theirs = [norm(p) for p in [meta.get("cwd"), *(meta.get("add_dirs") or [])] if p]
+            # WindowsPath comparisons are case-insensitive; a parent and its subfolder overlap too.
+            if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for a in mine for b in theirs):
+                found.append(jid)
+    return found
+
+
+def _conflict_warning(mode: str, cwd: str, add_dirs: list[str] | None) -> str | None:
+    if mode != "write":
+        return None
+    others = _write_conflicts([cwd, *(add_dirs or [])])
+    if not others:
+        return None
+    return (f"other write job(s) running in an overlapping folder: {', '.join(others)}. "
+            "Make sure they do not edit the same files (and do not edit them yourself meanwhile).")
+
+
 def _check_session_free(thread: str | None) -> None:
     busy = _job_running_on_thread(thread) if thread else None
     if busy:
@@ -202,6 +244,7 @@ def _create_and_launch(prompt: str, cwd: str, mode: str, model: str | None, effo
                        exe: str, limits_info: dict, limits_before: dict | None,
                        opts: dict | None = None) -> dict:
     opts = {"web_search": bool((opts or {}).get("web_search")), "network": bool((opts or {}).get("network"))}
+    warning = _conflict_warning(mode, cwd, add_dirs)  # before create_job: the new job must not see itself
     job_id, d = jobs.create_job(codex.PROVIDER, prompt, {
         "mode": mode, "cwd": cwd, "model": model, "effort": effort, "add_dirs": add_dirs or [],
         "parent_job": parent_job, "resume_thread": resume_thread,
@@ -225,6 +268,8 @@ def _create_and_launch(prompt: str, cwd: str, mode: str, model: str | None, effo
               "hint": "call codex_wait(job_id) when you are ready for the result"}
     if opts["web_search"]:
         result["web_search"] = True
+    if warning:
+        result["warning"] = warning
     return result
 
 
@@ -404,7 +449,7 @@ def _w_status(job_id: str) -> tuple[str, dict, dict]:
 
 def _w_launch(prompt: str, cwd: str, mode: str, model: str | None, effort: str | None,
               add_dirs: list[str] | None, max_turns: int | None, resume_session: str | None,
-              parent_job: str | None, ultracode: bool | None = None) -> dict:
+              parent_job: str | None, ultracode: bool | None = None, shell: bool = True) -> dict:
     model = model or claude_worker.DEFAULT_MODEL
     effort = effort or claude_worker.DEFAULT_EFFORT
     # Ultracode only for write jobs: workflow subagents may get edit rights, which would
@@ -427,21 +472,28 @@ def _w_launch(prompt: str, cwd: str, mode: str, model: str | None, effort: str |
                 raise ToolError(f"worker session {resume_session} is already busy in job {jid}")
     if running >= WORKER_MAX_RUNNING:
         raise ToolError(f"{running} worker jobs already running (limit {WORKER_MAX_RUNNING})")
+    warning = _conflict_warning(mode, cwd, add_dirs)  # before create_job: the new job must not see itself
     job_id, d = jobs.create_job(claude_worker.PROVIDER, prompt, {
         "mode": mode, "cwd": cwd, "model": model, "effort": effort, "add_dirs": add_dirs or [],
         "max_turns": max_turns, "resume_session": resume_session, "parent_job": parent_job,
         "task_preview": " ".join(prompt.split())[:300], "claude_exe": exe,
-        "config_dir": str(claude_worker.config_dir()), "ultracode": ultracode,
+        "config_dir": str(claude_worker.config_dir()), "ultracode": ultracode, "shell": shell,
     })
-    argv = claude_worker.build_argv(exe, mode, model, effort, add_dirs, max_turns, resume_session, ultracode)
+    argv = claude_worker.build_argv(exe, mode, model, effort, add_dirs, max_turns, resume_session, ultracode,
+                                    shell)
     try:
         jobs.launch(job_id, argv, cwd, claude_worker.child_env(ultracode))
     except OSError as e:
         jobs.write_json(d / "exit.json", {"exit_code": -1, "finished_at": jobs.now_iso(), "error": str(e)})
         raise ToolError(f"failed to start worker B: {e}") from e
-    return {"job_id": job_id, "status": "running", "mode": mode, "cwd": cwd, "model": model,
-            "effort": "ultracode (xhigh)" if ultracode else effort,
-            "hint": "call worker_wait(job_id) when you are ready for the result"}
+    result = {"job_id": job_id, "status": "running", "mode": mode, "cwd": cwd, "model": model,
+              "effort": "ultracode (xhigh)" if ultracode else effort,
+              "hint": "call worker_wait(job_id) when you are ready for the result"}
+    if mode == "write":
+        result["shell"] = shell
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 @mcp.tool()
@@ -450,13 +502,20 @@ async def worker_start(
                                            "goal, paths, constraints, definition of done, what to return.")],
     cwd: Annotated[str, Field(description="Absolute path of the folder B works in.")],
     mode: Annotated[Mode, Field(description="read-only: read/search files and the web, no edits, no shell. "
-                                            "write: may edit files in cwd/add_dirs and run shell commands.")] = "read-only",
-    model: Annotated[str | None, Field(description="Claude model id or alias. Default: claude-opus-5-5 "
-                                                   "(the user's choice for development).")] = None,
-    effort: Annotated[str | None, Field(description="low | medium | high | xhigh | max. Default: xhigh. "
+                                            "write: may edit files in cwd/add_dirs and (unless shell=false) "
+                                            "run shell commands with network, as the Windows user.")] = "read-only",
+    model: Annotated[str | None, Field(description="Claude model id or alias. "
+                                                   f"Default: {claude_worker.DEFAULT_MODEL}.")] = None,
+    effort: Annotated[str | None, Field(description="low | medium | high | xhigh | max. "
+                                                    f"Default: {claude_worker.DEFAULT_EFFORT}. "
                                                     "Ignored when ultracode is on (it implies xhigh).")] = None,
-    ultracode: Annotated[bool | None, Field(description="Ultracode (multi-agent workflows, max 3 concurrent). "
-                                                        "Default: on for write jobs; never for read-only.")] = None,
+    ultracode: Annotated[bool | None, Field(description="Ultracode (multi-agent workflows, max 3 concurrent; "
+                                                        "costly). Default: "
+                                                        + ("on" if claude_worker.DEFAULT_ULTRACODE else "off")
+                                                        + " for write jobs; never for read-only.")] = None,
+    shell: Annotated[bool, Field(description="Write mode only: allow shell commands (Bash, with network). "
+                                             "false = file edits only. Some commands are always denied "
+                                             f"({'; '.join(claude_worker.WRITE_DENY) or 'none'}).")] = True,
     add_dirs: Annotated[list[str] | None, Field(description="Extra absolute folders B may work in.")] = None,
     max_turns: Annotated[int | None, Field(ge=1, le=500, description="Optional cap on agent turns.")] = None,
 ) -> dict:
@@ -464,7 +523,7 @@ async def worker_start(
     cwd = _check_cwd(cwd, mode)
     for extra in add_dirs or []:
         _check_cwd(extra, mode)
-    return _w_launch(task, cwd, mode, model, effort, add_dirs, max_turns, None, None, ultracode)
+    return _w_launch(task, cwd, mode, model, effort, add_dirs, max_turns, None, None, ultracode, shell)
 
 
 @mcp.tool()
@@ -483,7 +542,7 @@ async def worker_reply(
     mode = mode or meta.get("mode") or "read-only"
     cwd = _check_cwd(meta["cwd"], mode)
     return _w_launch(message, cwd, mode, meta.get("model"), meta.get("effort"), meta.get("add_dirs"),
-                     meta.get("max_turns"), session, job_id, meta.get("ultracode"))
+                     meta.get("max_turns"), session, job_id, meta.get("ultracode"), meta.get("shell", True))
 
 
 @mcp.tool()

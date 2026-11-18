@@ -3,7 +3,7 @@
 Same job machinery as the MCP server (the job shows up in codex_status), but usable from a
 shell, a scheduled task or a background process when the MCP tools are not loaded.
 
-    E:\\Development\\AI\\Claude\\Utils\\Bin\\Windows\\Python3\\python.exe scripts\\codex_job.py
+    <clone>\\Utils\\Bin\\Windows\\Python3\\python.exe scripts\\codex_job.py
         --task-file TASK.md --cwd E:\\Some\\Project [--mode write] [--effort medium]
         [--start-at 05:25] [--wait-min 60] [--dry-run] [--no-limits]
 

@@ -27,14 +27,15 @@
 | `calibrate_usage_estimate.py` | ручная перекалибровка оценки по стенограммам (нужна редко) |
 | `usage-limits.md` | справочник: окна, источники данных, калибровка, история решений |
 
-Python — общий портативный для инструментов Claude:
+Python — общий портативный для инструментов этого репозитория (ставится
+`python_setup.bat` в корне клона):
 
 ```
-E:\Development\AI\Claude\Utils\Bin\Windows\Python3\python.exe
+<clone>\Utils\Bin\Windows\Python3\python.exe
 ```
 
 Ниже он сокращённо `<python>`, а путь к этой папке — `<guard>`
-(`E:\Development\AI\Claude\Projects\UsageGuard`). Сторонних пакетов guard не
+(`<clone>\Projects\UsageGuard`), где `<clone>` — папка клона. Сторонних пакетов guard не
 требует, только стандартная библиотека.
 
 ---
@@ -139,10 +140,13 @@ Set-Content -NoNewline -Encoding ascii "$HOME\.claude-worker-b\usage-limits-toke
 сделанное пропускается:
 
 ```powershell
-& "E:\Development\AI\Claude\Utils\Bin\Windows\Python3\python.exe" "E:\Development\AI\Claude\Projects\UsageGuard\install_user_hooks.py"
+& "<python>" "<guard>\install_user_hooks.py"
 ```
 
-Для каждого каталога аккаунта (`~\.claude`, `~\.claude-worker-b`; список — в
+Пути в хуках и в разделе `CLAUDE.md` установщик берёт от расположения клона: хуки
+запускают `<python>` этого клона (если его нет — тот Python, которым запущен
+установщик). Для каждого каталога аккаунта (`~\.claude` и каталог второго аккаунта —
+`TASK_DELEGATOR_WORKER_CONFIG_DIR`, по умолчанию `~\.claude-worker-b`; список — в
 начале скрипта, `CONFIG_DIRS`) он:
 
 1. **добавляет хуки** в `settings.json` (если там уже есть свой блок `hooks`, не
@@ -166,26 +170,26 @@ Set-Content -NoNewline -Encoding ascii "$HOME\.claude-worker-b\usage-limits-toke
 ### Вручную
 
 Блок для `settings.json` аккаунта (в `~\.claude\settings.json`,
-`~\.claude-worker-b\settings.json` — одинаковый):
+`~\.claude-worker-b\settings.json` — одинаковый). Подставьте свои пути, через `/`:
 
 ```json
 "hooks": {
   "UserPromptSubmit": [{"hooks": [{"type": "command", "timeout": 15,
-    "command": "E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe",
-    "args": ["E:/Development/AI/Claude/Projects/UsageGuard/usage_guard.py", "-mode", "prompt"]}]}],
+    "command": "<python>",
+    "args": ["<guard>/usage_guard.py", "-mode", "prompt"]}]}],
   "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "timeout": 15,
-    "command": "E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe",
-    "args": ["E:/Development/AI/Claude/Projects/UsageGuard/usage_guard.py", "-mode", "watch"]}]}],
+    "command": "<python>",
+    "args": ["<guard>/usage_guard.py", "-mode", "watch"]}]}],
   "Stop": [{"hooks": [{"type": "command", "timeout": 15,
-    "command": "E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe",
-    "args": ["E:/Development/AI/Claude/Projects/UsageGuard/usage_guard.py", "-mode", "stop", "-probe", "force"]}]}]
+    "command": "<python>",
+    "args": ["<guard>/usage_guard.py", "-mode", "stop", "-probe", "force"]}]}]
 }
 ```
 
 Навык:
 
 ```powershell
-New-Item -ItemType Junction "$HOME\.claude\skills\long-run" -Target "E:\Development\AI\Claude\Projects\UsageGuard\skills\long-run"
+New-Item -ItemType Junction "$HOME\.claude\skills\long-run" -Target "<guard>\skills\long-run"
 ```
 
 ### Жёсткий запрет (по желанию)
@@ -311,9 +315,12 @@ New-Item -ItemType File "$env:TEMP\claude-usage-guard-stop-<сессия>" -Forc
 
 ## Новая машина или новый аккаунт
 
-- **Новая машина:** скопировать `E:\Development\AI\Claude\Projects\UsageGuard` и
-  `E:\Development\AI\Claude\Utils\Bin\Windows\Python3` на те же пути (иначе
-  поправить `PY` в `install_user_hooks.py` и пути в навыке), затем шаги 1–4.
+- **Новая машина:** клонировать репозиторий в любую папку, запустить
+  `python_setup.bat`, затем шаги 1–4. Навык `long-run` путей не содержит: он берёт их из
+  раздела `CLAUDE.md`, который пишет установщик.
+- **Перенос клона:** пути в уже записанных хуках и в разделе `CLAUDE.md` старые. Удалите
+  блок `hooks` из `settings.json` каждого аккаунта, раздел «Бюджет использования» из его
+  `CLAUDE.md` и ссылку `skills\long-run`, затем запустите установщик снова.
 - **Новый аккаунт на этой машине:** добавить его каталог в `CONFIG_DIRS` в
   `install_user_hooks.py`, выпустить ему токен под его учёткой, положить в его
   каталог и запустить установщик ещё раз.
@@ -351,7 +358,7 @@ New-Item -ItemType File "$env:TEMP\claude-usage-guard-stop-<сессия>" -Forc
 ## После правок в `usage_guard.py`
 
 ```powershell
-& "E:\Development\AI\Claude\Utils\Bin\Windows\Python3\python.exe" "E:\Development\AI\Claude\Projects\UsageGuard\verify_usage_guard.py"
+& "<python>" "<guard>\verify_usage_guard.py"
 ```
 
 Восемь сценариев оценки и восемь проверок разделения аккаунтов — все должны

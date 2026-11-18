@@ -2,7 +2,7 @@
 """Reads the Claude plan usage telemetry and tells the assistant when to stop.
 
 Scope: this machine and the Claude account it runs under; no project of its own.
-Lives in E:/Development/AI/Claude/Projects/UsageGuard, wired as user-level hooks (see README.md).
+Lives in <clone>/Projects/UsageGuard, wired as user-level hooks (see README.md).
 
 Three data sources are combined:
 

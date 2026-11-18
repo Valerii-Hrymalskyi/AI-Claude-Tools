@@ -1,7 +1,7 @@
 # One-time sign-in of worker B (the second Claude account) for TaskDelegator.
 #
 # Run in YOUR OWN PowerShell window (not through Claude):
-#   powershell -ExecutionPolicy Bypass -File E:\Development\AI\Claude\Projects\MCP\TaskDelegator\scripts\worker_login.ps1
+#   powershell -ExecutionPolicy Bypass -File <clone>\Projects\MCP\TaskDelegator\scripts\worker_login.ps1
 #
 # Claude Code opens with a separate config folder. Type /login, sign in with the SECOND
 # account in the browser, then type /exit. Nothing here touches your main Claude login.

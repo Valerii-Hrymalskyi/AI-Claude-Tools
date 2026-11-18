@@ -24,7 +24,7 @@ Four cases, run against the real script through its command line:
 C is the regression that matters: it is the one that would turn this fix into a
 hole in the pause protocol.
 
-    E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe E:/Development/AI/Claude/Projects/UsageGuard/verify_usage_guard.py
+    <clone>/Utils/Bin/Windows/Python3/python.exe <clone>/Projects/UsageGuard/verify_usage_guard.py
 """
 import json
 import os

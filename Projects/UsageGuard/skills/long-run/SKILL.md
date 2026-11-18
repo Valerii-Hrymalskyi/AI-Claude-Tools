@@ -6,9 +6,13 @@ description: Carry a task across a usage limit — checkpoint, wait out the rese
 # Carrying a task across a usage limit
 
 This skill is an entry point, not a manual. The numbers, the data sources and
-why they are trustworthy live in
-`E:/Development/AI/Claude/Projects/UsageGuard/usage-limits.md` — read
-it once per session before the first pause.
+why they are trustworthy live in `<guard>/usage-limits.md` — read it once per
+session before the first pause.
+
+**Paths.** `<python>` and `<guard>` below stand for this machine's interpreter
+and UsageGuard folder. Take them from the `-mode status` command in the
+"usage guard" section of your user `CLAUDE.md`, or from the hook commands in
+`settings.json`: `install_user_hooks.py` writes both with the real paths.
 
 ## The one rule
 
@@ -27,7 +31,7 @@ user will walk away from:
 1. Check the budget:
 
    ```
-   E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe E:/Development/AI/Claude/Projects/UsageGuard/usage_guard.py -mode status
+   <python> <guard>/usage_guard.py -mode status
    ```
 
    `resets at` is when the current window ends; say in one line how many windows
@@ -58,7 +62,7 @@ Since 2026-08-17 those numbers are **measured, not estimated**: the guard asks t
 server and gets the true reset time of both windows. That is what allowed 80/92 to
 become 90/95 — the old thresholds were padding against an estimator that was wrong
 in both directions. Do not read an old 80 % or 92 % in some other document as
-current; the code is in `E:/Development/AI/Claude/Projects/UsageGuard/usage_guard.py`.
+current; the code is in `<guard>/usage_guard.py`.
 
 Act on the 90 % line when it appears: finish the current step, do not begin a
 new one. Update the checkpoint whenever a step completes. `-mode status` by hand
@@ -69,9 +73,10 @@ is only for planning ahead — how much of the task fits before the reset.
 Triggered by `verdict: PAUSE`, or by a hook denial, or by your own judgement
 that the remaining headroom will not cover the next step.
 
-**The deny message from the guard already contains this filled in** — the
-checkpoint path and the exact `Monitor` command, both stamped with this dialog's
-session id. Copy it from there rather than reconstructing it.
+**If the optional `PreToolUse` hook is wired, its deny message already contains
+this filled in** — the checkpoint path and the exact `Monitor` command, both
+stamped with this dialog's session id. Copy it from there rather than
+reconstructing it. Otherwise fill in `<python>`, `<guard>` and `<tag>` yourself.
 
 1. **Write the checkpoint.** Where you stopped, what is next, anything learned
    that is not yet in a file. This is the only thing that survives. A bench run
@@ -83,7 +88,7 @@ session id. Copy it from there rather than reconstructing it.
 
    ```
    Monitor(
-     command: '"E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe" -u "E:/Development/AI/Claude/Projects/UsageGuard/usage_guard.py" -mode wait -session <tag>',
+     command: '"<python>" -u "<guard>/usage_guard.py" -mode wait -session <tag>',
      description: 'waiting for the 5-hour usage window to reset',
      persistent: true,
      timeout_ms: 3600000

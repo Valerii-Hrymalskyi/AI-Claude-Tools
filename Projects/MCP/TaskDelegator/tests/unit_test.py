@@ -1,6 +1,6 @@
 """Offline unit tests (no Codex calls).
 
-    E:\\Development\\AI\\Claude\\Utils\\Bin\\Windows\\Python3\\python.exe tests\\unit_test.py
+    <clone>\\Utils\\Bin\\Windows\\Python3\\python.exe tests\\unit_test.py
 """
 
 from __future__ import annotations
@@ -507,6 +507,13 @@ def wcalls() -> list[dict]:
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()] if p.exists() else []
 
 
+def opt_values(argv: list[str], flag: str) -> list[str]:
+    """Values of a variadic CLI option: everything up to the next --flag."""
+    i = argv.index(flag) + 1
+    j = next((k for k in range(i, len(argv)) if argv[k].startswith("--")), len(argv))
+    return argv[i:j]
+
+
 WSTATE.write_text(json.dumps({}), encoding="utf-8")
 st = asyncio.run(server.worker_start(task="Сделай X", cwd=str(STATE), model="sonnet", effort="low"))
 res = asyncio.run(server.worker_wait(job_id=st["job_id"], timeout_sec=30))
@@ -530,8 +537,9 @@ check(res2.get("continues_job") == st["job_id"], "reply is linked to its parent 
 wj = asyncio.run(server.worker_start(task="пиши", cwd=str(STATE), mode="write", model="opus"))
 asyncio.run(server.worker_wait(job_id=wj["job_id"], timeout_sec=30))
 call = wcalls()[-1]
-check("acceptEdits" in call["argv"] and "Bash" in call["argv"] and "--disallowedTools" not in call["argv"],
-      "write: acceptEdits, edits and shell allowed", call["argv"])
+check("acceptEdits" in call["argv"] and "Bash" in opt_values(call["argv"], "--allowedTools")
+      and opt_values(call["argv"], "--disallowedTools") == claude_worker.WRITE_DENY == ["Bash(git push:*)"],
+      "write: acceptEdits, edits and shell allowed, git push denied", call["argv"])
 a = call["argv"]
 check(a[a.index("--effort") + 1] == "ultracode" and a[a.index("--settings") + 1] == str(claude_worker.WORKFLOW_SETTINGS)
       and call["wf_agents"] == "3", "write jobs default to ultracode + workflow settings + 3 concurrent agents", a)
@@ -564,6 +572,44 @@ except Exception as e:
     check("not a worker job" in str(e), "codex ids are rejected by worker tools", e)
 lst = asyncio.run(server.worker_status())
 check(len(lst["jobs"]) >= 4 and all(j["job_id"].startswith("worker-") for j in lst["jobs"]), "worker_status lists only worker jobs", lst)
+
+# --- overlapping write jobs are flagged; B can write without a shell --------------------
+sleeper = spawn_sleeper()
+ov_root = Path(tempfile.mkdtemp(prefix="task-delegator-overlap-"))
+(ov_root / "sub").mkdir()
+busy = fake_job({"pid": sleeper.pid, "pid_created": procs.process_created(sleeper.pid), "image": "python.exe",
+                 "mode": "write", "cwd": str(ov_root)})
+w = server._conflict_warning("write", str(ov_root / "sub"), None)
+check(w is not None and busy in w, "write job in a subfolder of a running write job is warned", w)
+check(busy in (server._conflict_warning("write", str(ov_root.parent).upper(), None) or ""),
+      "a parent folder in other letter case is warned too")
+check(busy in (server._conflict_warning("write", str(STATE), [str(ov_root)]) or ""), "add_dirs are compared too")
+elsewhere = Path(tempfile.mkdtemp(prefix="task-delegator-elsewhere-"))
+busy2 = fake_job({"pid": sleeper.pid, "pid_created": procs.process_created(sleeper.pid), "image": "python.exe",
+                  "mode": "write", "cwd": str(elsewhere), "add_dirs": [str(ov_root / "other" / ".." / "shared")]})
+check(busy2 in (server._conflict_warning("write", str(ov_root / "shared"), None) or ""),
+      "'..' in a running job's add_dirs is folded before comparing")
+check(server._conflict_warning("write", str(STATE), None) is None, "an unrelated folder is not warned")
+check(server._conflict_warning("read-only", str(ov_root), None) is None, "read-only jobs are never warned")
+with mock.patch.object(server.jobs, "launch", lambda *a, **k: None):
+    cr = server._create_and_launch("t", str(ov_root), "write", None, None, None, None, None,
+                                   "codex.exe", {"state": "ok"}, None)
+check(busy in cr.get("warning", ""), "a Codex write start reports the overlapping job", cr)
+
+WSTATE.write_text(json.dumps({}), encoding="utf-8")
+ns = asyncio.run(server.worker_start(task="без shell", cwd=str(ov_root), mode="write", ultracode=False, shell=False))
+check(busy in ns.get("warning", "") and ns.get("shell") is False, "worker_start reports the overlap and shell=false", ns)
+asyncio.run(server.worker_wait(job_id=ns["job_id"], timeout_sec=30))
+a = wcalls()[-1]["argv"]
+check("Edit" in opt_values(a, "--allowedTools") and "Bash" not in opt_values(a, "--allowedTools")
+      and {"Bash", "PowerShell"} <= set(opt_values(a, "--disallowedTools")),
+      "write with shell=false: edits allowed, Bash/PowerShell denied", a)
+nr = asyncio.run(server.worker_reply(job_id=ns["job_id"], message="дальше"))
+asyncio.run(server.worker_wait(job_id=nr["job_id"], timeout_sec=30))
+a = wcalls()[-1]["argv"]
+check("Bash" not in opt_values(a, "--allowedTools"), "worker_reply keeps shell=false", a)
+sleeper.kill()
+sleeper.wait()
 os.environ.pop("CLAUDECODE", None)
 
 print("\nRESULT:", "ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}")

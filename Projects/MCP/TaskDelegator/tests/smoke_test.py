@@ -1,8 +1,12 @@
-"""End-to-end smoke test: spawns server.py over stdio like Claude Code does and drives real Codex jobs.
+"""End-to-end smoke test: spawns server.py over stdio like Claude Code does and drives real jobs.
 
-    E:\\Development\\AI\\Claude\\Utils\\Bin\\Windows\\Python3\\python.exe tests\\smoke_test.py [--quick]
+    <clone>\\Utils\\Bin\\Windows\\Python3\\python.exe tests\\smoke_test.py [--quick] [--worker]
 
-Uses an isolated state dir and a temp workspace; costs a few small Codex turns.
+Uses an isolated state dir and a temp workspace. SPENDS REAL QUOTA:
+  default   about 9 small Codex jobs (gpt default model, effort low), ~3 min;
+  --quick   3 Codex jobs (no write / add_dirs / cancel);
+  --worker  worker B instead of Codex: about 4 small jobs on the second Claude account
+            (haiku, effort low, no Ultracode); with --quick 3 jobs.
 """
 
 from __future__ import annotations
@@ -20,6 +24,8 @@ from mcp import ClientSession, StdioServerParameters, stdio_client
 
 ROOT = Path(__file__).resolve().parents[1]
 QUICK = "--quick" in sys.argv
+WORKER = "--worker" in sys.argv
+WORKER_MODEL = {"model": "haiku", "effort": "low", "ultracode": False}  # cheapest B run that still proves the path
 
 failures: list[str] = []
 
@@ -41,7 +47,73 @@ async def call(s: ClientSession, name: str, args: dict | None = None) -> dict:
     return json.loads(r.content[0].text)
 
 
-async def main() -> None:
+async def worker_suite(s: ClientSession, work: Path) -> None:
+    """Worker B (second Claude account) end to end: read-only, reply, sandbox, write without shell, cancel."""
+    tools = {t.name for t in (await s.list_tools()).tools}
+    expected = {"worker_start", "worker_reply", "worker_wait", "worker_status", "worker_cancel"}
+    check(expected <= tools, "all worker tools listed", tools)
+    doc = await call(s, "delegator_doctor")
+    wb = doc.get("worker_b", {})
+    print("   worker_b:", json.dumps(wb, ensure_ascii=False))
+    check(bool(wb.get("exe")), "doctor finds claude.exe for worker B", wb)
+    check((wb.get("auth") or {}).get("loggedIn") is True, "worker B account is logged in", wb)
+    if failures:
+        return  # no point spending quota on a worker that cannot start
+
+    # 1) read-only question in Russian (UTF-8 through stdin)
+    t0 = time.monotonic()
+    st = await call(s, "worker_start", {
+        "task": "Прочитай data.txt и ответь одним словом: какое там секретное слово? Ничего не меняй.",
+        "cwd": str(work), **WORKER_MODEL})
+    check(st.get("status") == "running" and "job_id" in st, "start read-only worker job", st)
+    res = await call(s, "worker_wait", {"job_id": st["job_id"], "timeout_sec": 300})
+    print(f"   read-only job: {res.get('status')} in {time.monotonic() - t0:.0f}s, "
+          f"answer={res.get('final_message', '')[:120]!r}")
+    rl = res.get("rate_limits") or {}
+    if rl.get("status") == "rejected":
+        check(False, f"worker B is rate-limited ({rl.get('rateLimitType')}), nothing else can be tested; "
+                     f"resets {time.strftime('%Y-%m-%d %H:%M', time.localtime(rl.get('resetsAt') or 0))}")
+        return
+    check(res.get("status") == "completed", "read-only worker job completed", res)
+    check("альбатрос" in res.get("final_message", "").lower(), "UTF-8 prompt/answer round-trip", res)
+    check(bool(res.get("session_id")), "session id captured", res)
+    check(isinstance(res.get("rate_limits"), dict), "B's rate limits come with the result", res)
+    print("   rate_limits:", json.dumps(res.get("rate_limits"), ensure_ascii=False)[:300])
+
+    # 2) follow-up in the same session
+    rep = await call(s, "worker_reply", {"job_id": st["job_id"], "message": "Повтори то же слово задом наперёд, только слово."})
+    res2 = await call(s, "worker_wait", {"job_id": rep["job_id"], "timeout_sec": 300})
+    print(f"   reply: {res2.get('status')} answer={res2.get('final_message', '')[:80]!r}")
+    check("сортабьла" in res2.get("final_message", "").lower(), "reply kept session context", res2)
+    check(res2.get("continues_job") == st["job_id"], "reply linked to parent job", res2)
+
+    # 3) read-only must not be able to write
+    ro = await call(s, "worker_start", {
+        "task": "Создай файл ro_probe.txt с текстом 1 любым способом. Если не получится, просто скажи BLOCKED.",
+        "cwd": str(work), **WORKER_MODEL})
+    await call(s, "worker_wait", {"job_id": ro["job_id"], "timeout_sec": 300})
+    check(not (work / "ro_probe.txt").exists(), "read-only worker cannot write")
+
+    if QUICK:
+        return
+    # 4) write mode without a shell still edits files
+    wr = await call(s, "worker_start", {
+        "task": "Создай в текущей папке файл hello.py с одной строкой: print('hi'). Больше ничего не делай.",
+        "cwd": str(work), "mode": "write", "shell": False, **WORKER_MODEL})
+    check(wr.get("shell") is False, "write job started without a shell", wr)
+    resw = await call(s, "worker_wait", {"job_id": wr["job_id"], "timeout_sec": 300})
+    print(f"   write job: {resw.get('status')} files={resw.get('files_edited')}")
+    check(resw.get("status") == "completed" and (work / "hello.py").exists(), "write mode created the file", resw)
+
+    # 5) cancel a running job
+    lc = await call(s, "worker_start", {
+        "task": "Напиши подробное эссе на 3000 слов об истории компиляторов.", "cwd": str(work), **WORKER_MODEL})
+    await asyncio.sleep(4)
+    cc = await call(s, "worker_cancel", {"job_id": lc["job_id"]})
+    check(cc.get("status") == "cancelled", "cancel stops the worker job", cc)
+
+
+async def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="task-delegator-smoke-"))
     state = Path(tempfile.mkdtemp(prefix="task-delegator-state-"))
     (work / "data.txt").write_text("секретное слово: альбатрос\n", encoding="utf-8")
@@ -51,6 +123,9 @@ async def main() -> None:
 
     async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
         await s.initialize()
+        if WORKER:
+            await worker_suite(s, work)
+            return report()
         tools = {t.name for t in (await s.list_tools()).tools}
         expected = {"codex_start", "codex_reply", "codex_wait", "codex_status", "codex_cancel", "delegator_doctor"}
         check(expected <= tools, "all tools listed", tools)
@@ -158,9 +233,13 @@ async def main() -> None:
         lst = await call(s, "codex_status", {})
         check(len(lst.get("jobs", [])) >= 3, "status lists recent jobs", lst)
 
+    return report()
+
+
+def report() -> int:
     print("\nRESULT:", "ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}")
-    sys.exit(1 if failures else 0)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

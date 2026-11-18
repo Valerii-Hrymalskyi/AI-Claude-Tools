@@ -5,17 +5,25 @@ settings.json, appends the usage-budget section to its CLAUDE.md and links
 skills/long-run to the single copy next to this script (a junction, no admin).
 Idempotent: a step already done is reported and skipped.
 
-    E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe install_user_hooks.py
+All paths come from where this clone lives. The hooks run the clone's portable Python
+(<clone>/Utils/Bin/Windows/Python3/python.exe, installed by python_setup.bat); without it,
+the Python that runs this installer.
+
+    <clone>\\Utils\\Bin\\Windows\\Python3\\python.exe <clone>\\Projects\\UsageGuard\\install_user_hooks.py
 """
 import json
 import os
 import subprocess
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PY = "E:/Development/AI/Claude/Utils/Bin/Windows/Python3/python.exe"
+CLONE_ROOT = os.path.dirname(os.path.dirname(HERE))
+_PORTABLE_PY = os.path.join(CLONE_ROOT, "Utils", "Bin", "Windows", "Python3", "python.exe")
+PY = (_PORTABLE_PY if os.path.isfile(_PORTABLE_PY) else sys.executable).replace("\\", "/")
 GUARD = os.path.join(HERE, "usage_guard.py").replace("\\", "/")
 HOME = os.path.expanduser("~")
-CONFIG_DIRS = (os.path.join(HOME, ".claude"), os.path.join(HOME, ".claude-worker-b"))
+CONFIG_DIRS = (os.path.join(HOME, ".claude"),
+               os.environ.get("TASK_DELEGATOR_WORKER_CONFIG_DIR") or os.path.join(HOME, ".claude-worker-b"))
 
 
 def cmd(*mode):
