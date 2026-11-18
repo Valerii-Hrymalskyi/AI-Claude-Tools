@@ -226,7 +226,7 @@ def check_accounts(root):
     spec.loader.exec_module(guard)
 
     home = os.path.join(root, "home")
-    worker = os.path.join(root, "home", ".claude-worker-b")
+    worker = os.path.join(root, "home", ".claude-accounts", "pro")
     os.makedirs(os.path.join(home, ".claude"))
     os.makedirs(worker)
     failures = []

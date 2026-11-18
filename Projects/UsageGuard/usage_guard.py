@@ -231,7 +231,7 @@ def parse_probe_headers(headers):
 
 #-- Whose limits: one machine, several Claude accounts -------------------------
 #
-# A second account runs with its own CLAUDE_CONFIG_DIR (e.g. ~/.claude-worker-b).
+# Another account runs with its own CLAUDE_CONFIG_DIR (e.g. ~/.claude-accounts/<name>).
 # Everything account-bound follows that dir: the token, the probe cache, the
 # watch state and the transcripts.  The token used to live only in a user-level
 # environment variable, which every process on the machine inherits -- so both

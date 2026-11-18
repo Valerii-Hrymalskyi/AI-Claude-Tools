@@ -1,6 +1,6 @@
 """Wires usage_guard.py into every Claude account on this machine, at user level.
 
-For each config dir (~/.claude, ~/.claude-worker-b): adds the three hooks to its
+For each config dir (~/.claude and every ~/.claude-accounts/<name>): adds the three hooks to its
 settings.json, appends the usage-budget section to its CLAUDE.md and links
 skills/long-run to the single copy next to this script (a junction, no admin).
 Idempotent: a step already done is reported and skipped.
@@ -22,8 +22,11 @@ _PORTABLE_PY = os.path.join(CLONE_ROOT, "Utils", "Bin", "Windows", "Python3", "p
 PY = (_PORTABLE_PY if os.path.isfile(_PORTABLE_PY) else sys.executable).replace("\\", "/")
 GUARD = os.path.join(HERE, "usage_guard.py").replace("\\", "/")
 HOME = os.path.expanduser("~")
+
+# The main account plus every other Claude account TaskDelegator knows (<root>/.claude-accounts/<name>).
+_ACCOUNTS = os.path.join(os.environ.get("TASK_DELEGATOR_ACCOUNTS_ROOT") or HOME, ".claude-accounts")
 CONFIG_DIRS = (os.path.join(HOME, ".claude"),
-               os.environ.get("TASK_DELEGATOR_WORKER_CONFIG_DIR") or os.path.join(HOME, ".claude-worker-b"))
+               *sorted(e.path for e in (os.scandir(_ACCOUNTS) if os.path.isdir(_ACCOUNTS) else ()) if e.is_dir()))
 
 
 def cmd(*mode):

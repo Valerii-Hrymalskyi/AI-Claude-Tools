@@ -8,8 +8,8 @@
 
 Инструмент принадлежит **машине и аккаунту Claude**, а не какому-либо проекту:
 хуки прописаны на уровне пользователя и работают в любом каталоге. На одной
-машине может быть несколько аккаунтов (например, головной `~/.claude` и второй
-`~/.claude-worker-b`); каждый видит **свои** лимиты.
+машине может быть несколько аккаунтов (например, головной `~/.claude` и другие в
+`~/.claude-accounts/<имя>`); каждый видит **свои** лимиты.
 
 Как устроены лимиты, откуда берутся цифры и почему им можно верить —
 [`usage-limits.md`](usage-limits.md).
@@ -113,7 +113,7 @@ Guard ищет токен в файле каталога **своего** акк
 
 ```powershell
 Set-Content -NoNewline -Encoding ascii "$HOME\.claude\usage-limits-token"          "sk-ant-oat01-..."   # головной
-Set-Content -NoNewline -Encoding ascii "$HOME\.claude-worker-b\usage-limits-token" "sk-ant-oat01-..."   # второй
+Set-Content -NoNewline -Encoding ascii "$HOME\.claude-accounts\pro\usage-limits-token" "sk-ant-oat01-..."   # другой
 ```
 
 Файл подхватывается сразу, перезапуск не нужен.
@@ -145,9 +145,9 @@ Set-Content -NoNewline -Encoding ascii "$HOME\.claude-worker-b\usage-limits-toke
 
 Пути в хуках и в разделе `CLAUDE.md` установщик берёт от расположения клона: хуки
 запускают `<python>` этого клона (если его нет — тот Python, которым запущен
-установщик). Для каждого каталога аккаунта (`~\.claude` и каталог второго аккаунта —
-`TASK_DELEGATOR_WORKER_CONFIG_DIR`, по умолчанию `~\.claude-worker-b`; список — в
-начале скрипта, `CONFIG_DIRS`) он:
+установщик). Для каждого каталога аккаунта (`~\.claude` и каждая папка
+`~\.claude-accounts\<имя>` — другие аккаунты TaskDelegator, корень меняет
+`TASK_DELEGATOR_ACCOUNTS_ROOT`; список — в начале скрипта, `CONFIG_DIRS`) он:
 
 1. **добавляет хуки** в `settings.json` (если там уже есть свой блок `hooks`, не
    трогает его и говорит об этом — тогда сведите вручную, см. ниже);
@@ -170,7 +170,7 @@ Set-Content -NoNewline -Encoding ascii "$HOME\.claude-worker-b\usage-limits-toke
 ### Вручную
 
 Блок для `settings.json` аккаунта (в `~\.claude\settings.json`,
-`~\.claude-worker-b\settings.json` — одинаковый). Подставьте свои пути, через `/`:
+`~\.claude-accounts\<имя>\settings.json` — одинаковый). Подставьте свои пути, через `/`:
 
 ```json
 "hooks": {
@@ -228,7 +228,7 @@ Limits:
 Чтобы проверить **другой** аккаунт, запустите с его каталогом:
 
 ```powershell
-$env:CLAUDE_CONFIG_DIR = "$HOME\.claude-worker-b"; & "<python>" "<guard>\usage_guard.py" -mode probe; Remove-Item Env:CLAUDE_CONFIG_DIR
+$env:CLAUDE_CONFIG_DIR = "$HOME\.claude-accounts\pro"; & "<python>" "<guard>\usage_guard.py" -mode probe; Remove-Item Env:CLAUDE_CONFIG_DIR
 ```
 
 У разных аккаунтов цифры должны различаться. Одинаковые — значит, оба берут

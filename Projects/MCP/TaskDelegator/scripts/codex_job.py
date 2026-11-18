@@ -1,10 +1,10 @@
 """Run one Codex job through the TaskDelegator core, optionally at a set time, and wait for it.
 
-Same job machinery as the MCP server (the job shows up in codex_status), but usable from a
+Same job machinery as the MCP server (the job shows up in task_status), but usable from a
 shell, a scheduled task or a background process when the MCP tools are not loaded.
 
     <clone>\\Utils\\Bin\\Windows\\Python3\\python.exe scripts\\codex_job.py
-        --task-file TASK.md --cwd E:\\Some\\Project [--mode write] [--effort medium]
+        --task-file TASK.md --cwd D:\\Some\\Project [--agent codex] [--mode write] [--effort medium]
         [--start-at 05:25] [--wait-min 60] [--dry-run] [--no-limits]
 
 Before starting it checks Codex limits with the shared usage script (task_delegator.limits). If a
@@ -13,7 +13,7 @@ instead of failing. While waiting or running it keeps Windows from idle-sleeping
 when the process exits).
 
 Exit codes: 0 job completed, 1 job failed/cancelled/lost or setup error, 3 still running
-when --wait-min ran out (the job keeps going; check it with codex_status).
+when --wait-min ran out (the job keeps going; check it with task_status).
 """
 
 from __future__ import annotations
@@ -67,17 +67,21 @@ def sleep_until(target: datetime, why: str) -> None:
 MIN_PAUSE_WAIT_SEC = 60
 
 
-def gate_on_limits(pause: dict[str, float], margin_sec: int, max_rounds: int = 4) -> None:
-    """Return when limits allow a start; sleep through resets while they do not."""
+def gate_on_limits(pause: dict[str, float], margin_sec: int, max_rounds: int = 4,
+                   home: str | None = None) -> None:
+    """Return when limits allow a start; sleep through resets while they do not.
+
+    home: CODEX_HOME of the agent's account (None = the default account)."""
     custom = limits.thresholds()
     for kind, value in pause.items():
         if value is not None:
             custom[kind]["pause"] = value
     exe, _how = codex.find_codex()
+    env = codex.home_env(home)
     unavailable = pauses = 0
     while True:
         try:
-            usage = limits.read(exe)
+            usage = limits.read(exe, env=env)
         except limits.LimitsUnavailable as e:
             unavailable += 1
             log(f"limits: unavailable: {e}")
@@ -117,6 +121,7 @@ def parse_start_at(value: str) -> datetime:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--agent", default="codex", help="a Codex agent: codex or codex:<account> (default: codex)")
     ap.add_argument("--task-file", required=True)
     ap.add_argument("--cwd", required=True)
     ap.add_argument("--mode", choices=["read-only", "write"], default="read-only")
@@ -136,7 +141,7 @@ def main() -> int:
     if args.limits_script:
         os.environ["TASK_DELEGATOR_CODEX_USAGE_SCRIPT"] = args.limits_script
 
-    import server  # pulls in the MCP SDK; reuses the exact validation and launch path of codex_start
+    import server  # pulls in the MCP SDK; reuses the exact validation and launch path of task_start
 
     # Validate everything that can be validated BEFORE any waiting: a typo should fail now,
     # not after sleeping until --start-at.
@@ -144,14 +149,18 @@ def main() -> int:
         task = Path(args.task_file).read_text(encoding="utf-8-sig")
         if not task.strip():
             raise ValueError(f"task file is empty: {args.task_file}")
+        agent = server._agent(args.agent)
+        if agent.kind != codex.PROVIDER:
+            raise ValueError(f"{agent.id} is not a Codex agent; codex_job.py runs Codex agents only")
         cwd = server._check_cwd(args.cwd, args.mode)
-        exe = server._prepare(args.model, args.effort)
+        exe, model, effort = server._prepare(agent, args.model, args.effort)
+        options = server._options(agent, args.mode, {"web_search": True} if args.web_search else None)
         if not args.no_limits and not Path(limits.usage_script()).is_file():
             raise ValueError(f"usage script not found: {limits.usage_script()} (or pass --no-limits)")
     except Exception as e:  # ToolError, OSError, ValueError
         log(f"setup error: {e}")
         return 1
-    log(f"setup ok: codex={exe} mode={args.mode} effort={args.effort} cwd={cwd}")
+    log(f"setup ok: agent={agent.id} exe={exe} mode={args.mode} model={model} effort={effort} cwd={cwd}")
 
     if args.dry_run:
         log(f"dry-run: task is {len(task)} chars, first line: {task.strip().splitlines()[0][:120]!r}")
@@ -159,7 +168,7 @@ def main() -> int:
             log(f"dry-run: would wait until {parse_start_at(args.start_at):%H:%M}")
         if not args.no_limits:
             try:
-                verdict = limits.evaluate(limits.read(exe))
+                verdict = limits.evaluate(limits.read(exe, env=codex.home_env(agent.home)))
                 log(f"dry-run: limits now: {verdict['summary']} -> {verdict['state']}")
             except limits.LimitsUnavailable as e:
                 log(f"dry-run: limits unavailable now: {e}")
@@ -172,19 +181,18 @@ def main() -> int:
             log(f"--start-at {args.start_at} already passed today: starting now")
         sleep_until(target, f"--start-at {args.start_at}")
     if not args.no_limits:
-        gate_on_limits({"primary": args.pause_5h, "secondary": args.pause_7d}, args.reset_margin_sec)
+        gate_on_limits({"primary": args.pause_5h, "secondary": args.pause_7d}, args.reset_margin_sec,
+                       home=agent.home)
 
     # Our own gate above already decided (and may use custom thresholds), so the server-side
     # check must not veto it again; it still records the "before" reading for limits_cost.
     try:
-        started = server._launch(task, cwd, args.mode, args.model, args.effort, None, None, None,
-                                 ignore_limits=True,
-                                 opts={"web_search": args.web_search})
+        started = server._launch(agent, task, cwd, args.mode, model, effort, None, options, ignore_limits=True)
     except Exception as e:  # e.g. too many jobs running by now
         log(f"could not start: {e}")
         return 1
     job_id = started["job_id"]
-    log(f"started job {job_id} (mode={args.mode}, effort={args.effort}, cwd={cwd}); "
+    log(f"started job {job_id} on {agent.id} (mode={args.mode}, effort={effort}, cwd={cwd}); "
         f"limits: {started['limits'].get('summary') or started['limits'].get('note')}")
 
     deadline = time.monotonic() + args.wait_min * 60

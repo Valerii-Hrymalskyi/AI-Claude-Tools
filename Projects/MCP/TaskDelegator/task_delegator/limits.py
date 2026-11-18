@@ -32,13 +32,14 @@ SUBPROCESS_TIMEOUT_SEC = 45      # hard cap on the whole script run
 # A reset moves resets_at by a whole window; anything smaller is server-side jitter.
 _SAME_WINDOW_TOLERANCE_SEC = 600
 
-# Thresholds by window kind. Codex reports the short (5h) window as "primary"
-# and the weekly (7d) window as "secondary"; keying by kind survives a change of length.
+# Thresholds by window kind, the same for every agent. Codex reports the short (5h) window as
+# "primary" and the weekly (7d) window as "secondary"; keying by kind survives a change of length.
+# The older TASK_DELEGATOR_CODEX_* names are still read when the new ones are not set.
 _THRESHOLD_ENV = {
-    ("primary", "warn"): ("TASK_DELEGATOR_CODEX_WARN_5H", 90.0),
-    ("primary", "pause"): ("TASK_DELEGATOR_CODEX_PAUSE_5H", 95.0),
-    ("secondary", "warn"): ("TASK_DELEGATOR_CODEX_WARN_7D", 95.0),
-    ("secondary", "pause"): ("TASK_DELEGATOR_CODEX_PAUSE_7D", 98.0),
+    ("primary", "warn"): ("TASK_DELEGATOR_WARN_5H", 90.0),
+    ("primary", "pause"): ("TASK_DELEGATOR_PAUSE_5H", 95.0),
+    ("secondary", "warn"): ("TASK_DELEGATOR_WARN_7D", 95.0),
+    ("secondary", "pause"): ("TASK_DELEGATOR_PAUSE_7D", 98.0),
 }
 
 
@@ -53,15 +54,19 @@ def usage_script() -> str:
 def thresholds() -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = {"primary": {}, "secondary": {}}
     for (kind, level), (env, default) in _THRESHOLD_ENV.items():
+        legacy = env.replace("TASK_DELEGATOR_", "TASK_DELEGATOR_CODEX_", 1)
         try:
-            out[kind][level] = float(os.environ.get(env, default))
+            out[kind][level] = float(os.environ.get(env) or os.environ.get(legacy) or default)
         except ValueError:
             out[kind][level] = default
     return out
 
 
-def read(codex_exe: str | None = None) -> dict:
-    """Run the usage script and return its schema-1 JSON. Raises LimitsUnavailable."""
+def read(codex_exe: str | None = None, env: dict[str, str] | None = None) -> dict:
+    """Run the usage script and return its schema-1 JSON. Raises LimitsUnavailable.
+
+    env: the environment for the script (e.g. with CODEX_HOME of another account); None = inherit.
+    """
     script = usage_script()
     if not Path(script).is_file():
         raise LimitsUnavailable(f"usage script not found: {script} (set TASK_DELEGATOR_CODEX_USAGE_SCRIPT)")
@@ -70,7 +75,7 @@ def read(codex_exe: str | None = None) -> dict:
         argv += ["--codex-exe", codex_exe]
     try:
         r = subprocess.run(
-            argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=SUBPROCESS_TIMEOUT_SEC,
+            argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=SUBPROCESS_TIMEOUT_SEC, env=env,
             creationflags=procs.CREATE_NO_WINDOW if procs.IS_WINDOWS else 0,
         )
     except subprocess.TimeoutExpired as e:

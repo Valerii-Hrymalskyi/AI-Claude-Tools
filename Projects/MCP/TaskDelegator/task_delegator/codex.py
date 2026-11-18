@@ -1,4 +1,8 @@
-"""Codex CLI provider: find the executable, build `codex exec` argv, read its JSONL events."""
+"""Codex CLI provider: find the executable, build `codex exec` argv, read its JSONL events.
+
+Agents: "codex" is the default account (~/.codex or the server's CODEX_HOME); "codex:<name>" is
+another account whose home is %USERPROFILE%\\.codex-accounts\\<name> (passed as CODEX_HOME).
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from . import jobs, limits, procs
+from . import agents, jobs, limits, procs
 
 PROVIDER = "codex"
 EXE_NAME = "codex.exe" if os.name == "nt" else "codex"
@@ -84,11 +88,16 @@ def codex_version(exe: str) -> str:
     return _version_of(exe, _version_key(exe)[0])
 
 
-def login_status(exe: str) -> str:
+def home_env(home: str | None) -> dict[str, str] | None:
+    """The server's environment with CODEX_HOME pointing at an account (None = inherit as is)."""
+    return {**os.environ, "CODEX_HOME": home} if home else None
+
+
+def login_status(exe: str, home: str | None = None) -> str:
     try:
         r = subprocess.run(
             [exe, "login", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, env=home_env(home),
             creationflags=procs.CREATE_NO_WINDOW if procs.IS_WINDOWS else 0,
         )
         return (r.stdout or r.stderr).strip()
@@ -99,18 +108,18 @@ def login_status(exe: str) -> str:
 # --------------------------------------------------------------------------- models
 
 
-def models_cache_path() -> Path:
-    home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+def models_cache_path(home: str | None = None) -> Path:
+    home = home or os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
     return Path(home) / "models_cache.json"
 
 
-def available_models() -> list[dict] | None:
+def available_models(home: str | None = None) -> list[dict] | None:
     """Models this Codex account can use, from Codex's own cache (None if unreadable).
 
     Each entry: slug, name, description, efforts (supported reasoning levels), default_effort,
     listed (shown in Codex's model picker).
     """
-    data = jobs.read_json(models_cache_path())
+    data = jobs.read_json(models_cache_path(home))
     if not isinstance(data, dict) or not isinstance(data.get("models"), list):
         return None
     out = []
@@ -129,12 +138,12 @@ def available_models() -> list[dict] | None:
     return out
 
 
-def check_model_effort(model: str | None, effort: str | None) -> str | None:
+def check_model_effort(model: str | None, effort: str | None, home: str | None = None) -> str | None:
     """Return an error message if the model/effort pair is known to be invalid, else None.
 
     Fails open when Codex's model cache is missing or the model is not given.
     """
-    models = available_models()
+    models = available_models(home)
     if not models:
         return None
     by_slug = {m["slug"]: m for m in models}
@@ -155,11 +164,13 @@ def check_model_effort(model: str | None, effort: str | None) -> str | None:
 # --------------------------------------------------------------------------- argv / env
 
 
-def child_env() -> dict[str, str]:
+def child_env(home: str | None = None) -> dict[str, str]:
     env = {
         k: v for k, v in os.environ.items()
         if k.upper() not in _SCRUB_EXACT and not k.upper().startswith(_SCRUB_PREFIXES)
     }
+    if home:
+        env["CODEX_HOME"] = home
     env.setdefault("NO_COLOR", "1")
     return env
 
@@ -342,7 +353,7 @@ LATE_READING_SEC = 300
 
 
 def _take_after_reading(meta: dict, d: Path) -> dict:
-    usage = limits.read(meta.get("codex_exe"))
+    usage = limits.read(meta.get("exe") or meta.get("codex_exe"), env=home_env(meta.get("home")))
     rec = {"snapshot": limits.snapshot(usage), "summary": limits.evaluate(usage)["summary"],
            "measured_at": jobs.now_iso()}
     jobs.write_json(d / "limits_after.json", rec)
@@ -444,6 +455,7 @@ def job_view(job_id: str, detail: str = "summary") -> dict:
     d = jobs.job_dir(job_id)
     view: dict[str, Any] = {
         "job_id": job_id,
+        "agent": meta.get("agent") or PROVIDER,
         "status": status,
         "mode": meta.get("mode"),
         "cwd": meta.get("cwd"),
@@ -455,7 +467,7 @@ def job_view(job_id: str, detail: str = "summary") -> dict:
     if detail == "brief":
         return view
 
-    view["codex_session_id"] = ev["thread_id"]
+    view["session_id"] = ev["thread_id"]
     view["activity"] = {
         "events": ev["events"],
         "items": ev["item_counts"],
@@ -504,3 +516,82 @@ def job_view(job_id: str, detail: str = "summary") -> dict:
         "stderr": str(d / "stderr.log"),
     }
     return view
+
+
+# --------------------------------------------------------------------------- adapter
+
+
+class _Adapter:
+    kind = PROVIDER
+    TERMINAL = TERMINAL
+    DEFAULT_MAX_JOBS = 3
+    HAS_DEFAULT_ACCOUNT = True
+    OPTIONS: dict[str, tuple[Any, str]] = {
+        "web_search": (False, "let Codex search the live web (docs, release notes, error messages); "
+                              "works in read-only mode too. Its shell has no network either way."),
+    }
+
+    @staticmethod
+    def find_exe() -> tuple[str | None, str]:
+        return find_codex()
+
+    @staticmethod
+    def doctor(agent: agents.Agent, exe: str) -> dict:
+        models = available_models(agent.home)
+        return {
+            "version": codex_version(exe),
+            "login": login_status(exe, agent.home),
+            "models": ([{k: m[k] for k in ("slug", "description", "efforts")} for m in models if m["listed"]]
+                       if models else f"unavailable (no {models_cache_path(agent.home)})"),
+        }
+
+    @staticmethod
+    def validate(agent: agents.Agent, model: str | None, effort: str | None) -> str | None:
+        return check_model_effort(model, effort, agent.home)
+
+    @staticmethod
+    def check_options(options: dict) -> str | None:
+        if not isinstance(options.get("web_search"), bool):
+            return f"web_search must be true or false, got {options.get('web_search')!r}"
+        return None
+
+    @staticmethod
+    def limits(agent: agents.Agent, exe: str) -> tuple[dict, dict | None]:
+        """Fails open: if the usage script is unavailable the state is "unknown"."""
+        try:
+            usage = limits.read(exe, env=home_env(agent.home))
+        except limits.LimitsUnavailable as e:
+            return {"state": "unknown", "note": f"limits unavailable: {e}"}, None
+        return limits.evaluate(usage), limits.snapshot(usage)
+
+    @staticmethod
+    def build(agent: agents.Agent, exe: str, d: Path, meta: dict) -> tuple[list[str], dict, Any]:
+        last_msg = d / "last_message.txt"
+        # Shell network ("network") is deliberately not an option: on Windows the sandbox needs
+        # Codex's experimental network proxy, and the plain network_access switch has no effect.
+        opts = {"web_search": bool(meta["options"].get("web_search"))}
+        if meta.get("resume_session"):
+            argv = build_resume_argv(exe, meta["resume_session"], meta["mode"], last_msg, meta.get("model"),
+                                     meta.get("effort"), meta.get("add_dirs"), opts)
+        else:
+            argv = build_start_argv(exe, meta["cwd"], meta["mode"], last_msg, meta.get("model"),
+                                    meta.get("effort"), meta.get("add_dirs"), opts)
+        # Take the "after" limits reading the moment Codex exits, not whenever someone looks.
+        on_exit = capture_limits_after if meta.get("limits_before") else None
+        return argv, child_env(agent.home), on_exit
+
+    @staticmethod
+    def job_status(job_id: str) -> tuple[str, dict, dict]:
+        return job_status(job_id)
+
+    @staticmethod
+    def job_view(job_id: str, detail: str = "full") -> dict:
+        return job_view(job_id, detail)
+
+    @staticmethod
+    def session_of(meta: dict, ev: dict) -> str | None:
+        return ev.get("thread_id") or meta.get("resume_session") or meta.get("resume_thread")
+
+
+ADAPTER = _Adapter()
+agents.register(ADAPTER)

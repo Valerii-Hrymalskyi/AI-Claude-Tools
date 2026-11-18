@@ -3,7 +3,7 @@
     <clone>\\Utils\\Bin\\Windows\\Python3\\python.exe scripts\\doctor.py [--json]
 
 Calls the server's delegator_doctor tool and prints a short summary (or the full JSON with --json).
-Free: it starts no Codex or worker job. Exit code 0 when the server answered, 1 when it did not.
+Free: it starts no job on any agent. Exit code 0 when the server answered, 1 when it did not.
 """
 
 from __future__ import annotations
@@ -38,30 +38,40 @@ async def doctor() -> dict:
     return json.loads(res.content[0].text)
 
 
+def _row(label: str, ok: bool | None, text: str) -> str:
+    mark = "OK " if ok else ("-- " if ok is None else "!! ")
+    return f"{label:<24}{mark} {text}"
+
+
 def summary(d: dict) -> list[str]:
-    codex = d.get("codex") or {}
+    lines = [_row("server", True, f"task-delegator {d.get('delegator_version')}, Python {d.get('python')}")]
+    for kind, k in (d.get("kinds") or {}).items():
+        lines.append(_row(f"{kind} exe", bool(k.get("exe")), k.get("exe") or f"not found: {k.get('found_via')}"))
     usage = d.get("codex_usage") or {}
-    worker = d.get("worker_b") or {}
-    auth = worker.get("auth") or {}
-    lines = [f"server        OK  task-delegator {d.get('delegator_version')}, Python {d.get('python')}"]
-    if codex.get("exe"):
-        lines.append(f"codex.exe     OK  {codex['exe']} ({codex.get('version') or '?'})")
-        lines.append(f"codex login   {'OK ' if 'logged in' in str(codex.get('login')).lower() else '!! '} "
-                     f"{codex.get('login')}")
-    else:
-        lines.append(f"codex.exe     !!  not found: {codex.get('found_via')}")
-    if usage.get("exists"):
-        lines.append(f"codex limits  OK  {usage.get('script')}")
-    else:
-        lines.append(f"codex limits  !!  no usage script at {usage.get('script')}: limit checks will say 'unknown' "
-                     "(set TASK_DELEGATOR_CODEX_USAGE_SCRIPT)")
-    if worker.get("exe"):
-        ok = auth.get("loggedIn") is True
-        lines.append(f"worker B      {'OK ' if ok else '!! '} {worker['exe']}; config {worker.get('config_dir')}; "
-                     + ("logged in" if ok else "NOT logged in (run scripts\\worker_login.ps1)"))
-    else:
-        lines.append(f"worker B      !!  claude.exe not found: {worker.get('found_via')}")
-    lines.append(f"job history   --  {d.get('state_dir')} (kept {(d.get('limits') or {}).get('keep_days')} days)")
+    lines.append(_row("codex limits", bool(usage.get("exists")), usage.get("script") if usage.get("exists") else
+                      f"no usage script at {usage.get('script')}: Codex limit checks will say 'unknown' "
+                      "(set TASK_DELEGATOR_CODEX_USAGE_SCRIPT)"))
+    found = d.get("agents") or {}
+    for aid, a in found.items():
+        if "login" in a:  # codex
+            ok = "logged in" in str(a["login"]).lower()
+            lines.append(_row(f"agent {aid}", ok, f"{a.get('version') or '?'}; {a['login']}; home {a.get('home')}"))
+        elif "auth" in a:  # claude
+            auth = a["auth"] or {}
+            ok = auth.get("loggedIn") is True
+            lines.append(_row(f"agent {aid}", ok, f"home {a.get('home')}; " + (
+                f"logged in ({auth.get('subscriptionType') or '?'})" if ok
+                else f"NOT logged in (scripts\\claude_login.ps1 -Account {aid.partition(':')[2]})")))
+        else:
+            lines.append(_row(f"agent {aid}", False, "its CLI was not found"))
+    if not any(a.startswith("claude:") for a in found):
+        lines.append(_row("claude agents", None, f"none; add one: scripts\\claude_login.ps1 -Account <name> "
+                                                 f"(folders in {(d.get('accounts_dirs') or {}).get('claude')})"))
+    af = d.get("agents_file") or {}
+    lines.append(_row("agents.json", None, f"{af.get('path')} ({'present' if af.get('exists') else 'absent: defaults only'})"))
+    for p in d.get("problems") or []:
+        lines.append(_row("problem", False, p))
+    lines.append(_row("job history", None, f"{d.get('state_dir')} (kept {d.get('keep_days')} days)"))
     return lines
 
 

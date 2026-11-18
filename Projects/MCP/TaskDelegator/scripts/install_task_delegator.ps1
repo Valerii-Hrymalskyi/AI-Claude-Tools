@@ -10,9 +10,9 @@ Options:
                      the server environment registered before is kept unless -ServerEnv is given
   -ServerEnv "K=V;K2=V2"
                      server environment variables, e.g.
-                     "TASK_DELEGATOR_CODEX_USAGE_SCRIPT=D:\Tools\codex_usage.py;TASK_DELEGATOR_WORKER_MODEL=sonnet"
-                     (a ';' not followed by NAME= stays inside the value, so
-                     "TASK_DELEGATOR_WORKER_DENY=Bash(git push:*);Bash(avrdude:*)" is one variable)
+                     "TASK_DELEGATOR_CODEX_USAGE_SCRIPT=D:\Tools\codex_usage.py;TASK_DELEGATOR_KEEP_DAYS=30"
+                     (a ';' not followed by NAME= stays inside the value). Per-agent settings
+                     (model, effort, options, deny rules) belong in agents.json, not here.
   -Claude <path>     claude.exe to use (default: found automatically)
   -DryRun            print what would be done, change nothing
 
@@ -100,7 +100,7 @@ if (-not $script:claudeExe -or -not (Test-Path $script:claudeExe)) {
 }
 
 # Split only where the next item starts with NAME=: a value may itself contain ';'
-# (TASK_DELEGATOR_WORKER_DENY=Bash(git push:*);Bash(avrdude:*)).
+# (e.g. a path list).
 $envPairs = @($ServerEnv | ForEach-Object { $_ -split ';(?=\s*[A-Za-z_][A-Za-z0-9_]*=)' } |
     ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($kv in $envPairs) {
@@ -124,7 +124,7 @@ if (Test-Registered $OldName) {
 $oldState = Join-Path $env:LOCALAPPDATA 'AITools'
 if (Test-Path $oldState) {
     Write-Host "Old job history found: $oldState. It is not used any more: delete it, or move its jobs\*"
-    Write-Host "into $env:LOCALAPPDATA\TaskDelegator\jobs to keep them visible in codex_status."
+    Write-Host "into $env:LOCALAPPDATA\TaskDelegator\jobs to keep them visible in task_status."
 }
 
 # --- registration ----------------------------------------------------------------------------
@@ -164,5 +164,5 @@ foreach ($kv in $envPairs) {
 $rc = $LASTEXITCODE
 Write-Host ""
 Write-Host "Done. Start a new Claude session to get the mcp__${Name}__* tools."
-Write-Host "Lines marked !! above need attention; worker B sign-in: scripts\worker_login.ps1."
+Write-Host "Lines marked !! above need attention. Another Claude account: scripts\claude_login.ps1 -Account <name>."
 exit $rc
