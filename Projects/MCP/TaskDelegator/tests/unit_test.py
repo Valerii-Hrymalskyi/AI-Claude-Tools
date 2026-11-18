@@ -663,6 +663,21 @@ busy2 = fake_job({"pid": sleeper.pid, "pid_created": procs.process_created(sleep
                   "mode": "write", "cwd": str(elsewhere), "add_dirs": [str(ov_root / "other" / ".." / "shared")]})
 check(busy2 in (server._conflict_warning("write", str(ov_root / "shared"), None) or ""),
       "'..' in a running job's add_dirs is folded before comparing")
+# 8.3 short names (C:\Users\RUNNER~1\... on CI runners) name the same folder as the long ones.
+import ctypes  # noqa: E402
+
+long_dir = ov_root / "LongFolderNameForShortNameCheck"
+long_dir.mkdir()
+_buf = ctypes.create_unicode_buffer(1024)
+_n = ctypes.windll.kernel32.GetShortPathNameW(str(long_dir), _buf, 1024) if os.name == "nt" else 0
+short_dir = _buf.value if _n else ""
+if short_dir and short_dir.lower() != str(long_dir).lower():
+    busy3 = fake_job({"pid": sleeper.pid, "pid_created": procs.process_created(sleeper.pid), "image": "python.exe",
+                      "mode": "write", "cwd": short_dir})
+    check(busy3 in (server._conflict_warning("write", str(long_dir), None) or ""),
+          "an 8.3 short name and the long name of one folder overlap", (short_dir, str(long_dir)))
+else:
+    check(True, "an 8.3 short name and the long name of one folder overlap (no short names on this volume)")
 check(server._conflict_warning("write", str(STATE), None) is None, "an unrelated folder is not warned")
 check(server._conflict_warning("read-only", str(ov_root), None) is None, "read-only jobs are never warned")
 with mock.patch.object(server.jobs, "launch", lambda *a, **k: None):

@@ -263,8 +263,13 @@ def _write_conflicts(roots: list[str]) -> list[str]:
     which the server cannot know in advance.
     """
     def norm(p: str) -> Path:
-        # add_dirs are stored as given: fold "..", "." and separators before comparing.
-        return Path(os.path.abspath(p))
+        # Paths arrive in different spellings: add_dirs are stored as given, cwd is resolved, and
+        # Windows may hand out 8.3 short names (C:\Users\RUNNER~1\...) for the same folder.
+        # resolve() folds "..", "." and separators and, for an existing folder, expands short names.
+        try:
+            return Path(p).resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return Path(os.path.abspath(p))
 
     mine = [norm(r) for r in roots if r]
     found = []
