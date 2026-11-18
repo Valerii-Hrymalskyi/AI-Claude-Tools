@@ -214,12 +214,12 @@ Ultracode стоил около 10 % окна 5h, 12-минутное иссле
 **Откуда цифры.**
 - **Codex** — отдельный скрипт `codex_usage.py`: сервер вызывает его подпроцессом с `--json` и
   опирается только на контракт `schema: 1` из [docs/codex-usage-requirements.md](docs/codex-usage-requirements.md).
-  Чтение бесплатное. **Скрипт — внешняя зависимость, в этом репозитории его нет.** Он общий с
-  хуком самого Codex и живёт в соседнем рабочем каталоге автора:
-  `<clone>\..\Codex\Utils\Scritps\GetUsage\codex_usage.py` (сервер ищет его там по умолчанию;
-  `Scritps` — настоящее имя папки). В другом месте — задайте путь в
-  `TASK_DELEGATOR_CODEX_USAGE_SCRIPT`. Без скрипта всё работает, но для Codex состояние всегда
-  `unknown`, и `limits_cost` не считается.
+  Чтение бесплатное. **Скрипт — из отдельного репозитория
+  [AI-Codex-Tools](https://github.com/Valerii-Hrymalskyi/AI-Codex-Tools)** (он общий с хуком самого
+  Codex). Клонируйте его рядом с этим, в ту же родительскую папку: сервер ищет
+  `<clone>\..\AI-Codex-Tools\Projects\GetUsage\codex_usage.py`, затем то же в `..\Codex\`. В
+  другом месте — задайте путь в `TASK_DELEGATOR_CODEX_USAGE_SCRIPT`. Без скрипта всё работает, но
+  для Codex состояние всегда `unknown`, и `limits_cost` не считается.
 - **Другой Claude** — последний `rate_limit_event` из задач этого аккаунта (бесплатно). Окно, время
   сброса которого уже прошло, считается начавшимся заново (0 %). Если задач у аккаунта ещё не было,
   состояние `unknown`.
@@ -358,7 +358,7 @@ tests/smoke_test.py               сквозной тест через наст�
 | `TASK_DELEGATOR_KEEP_DAYS` | `14` | через сколько дней удалять завершённые джобы |
 | `TASK_DELEGATOR_CODEX_EXE` | ищется сам | явный путь к `codex.exe` |
 | `TASK_DELEGATOR_CLAUDE_EXE` | ищется сам | явный путь к `claude.exe` для других аккаунтов Claude |
-| `TASK_DELEGATOR_CODEX_USAGE_SCRIPT` | `<clone>\..\Codex\Utils\Scritps\GetUsage\codex_usage.py` | скрипт лимитов Codex |
+| `TASK_DELEGATOR_CODEX_USAGE_SCRIPT` | `<clone>\..\AI-Codex-Tools\` (или `..\Codex\`) `Projects\GetUsage\codex_usage.py` | скрипт лимитов Codex |
 | `TASK_DELEGATOR_WARN_5H` / `TASK_DELEGATOR_PAUSE_5H` | `90` / `95` | пороги пятичасового окна, % |
 | `TASK_DELEGATOR_WARN_7D` / `TASK_DELEGATOR_PAUSE_7D` | `95` / `98` | пороги недельного окна, % |
 

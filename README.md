@@ -17,9 +17,10 @@
   не нужен.
 - **Claude Code** — настольное приложение или CLI.
 - **TaskDelegator:** для Codex — Codex CLI/приложение с выполненным входом; для «другого
-  Claude» — ещё один аккаунт Claude со своей подпиской (их может быть несколько). Скрипт лимитов Codex `codex_usage.py` — внешняя
-  зависимость, без него лимиты Codex не проверяются
-  ([подробнее](Projects/MCP/TaskDelegator/README.md#лимиты-codex)).
+  Claude» — ещё один аккаунт Claude со своей подпиской (их может быть несколько). Скрипт лимитов
+  Codex `codex_usage.py` — из соседнего репозитория
+  [AI-Codex-Tools](https://github.com/Valerii-Hrymalskyi/AI-Codex-Tools): клонируйте его рядом с
+  этим; без него лимиты Codex не проверяются ([подробнее](Projects/MCP/TaskDelegator/README.md#лимиты)).
 - **UsageGuard:** по желанию — токен `claude setup-token` для каждого аккаунта (точнее цифры).
 
 ## Начало работы
@@ -95,7 +96,9 @@ Local tools for Claude Code on Windows. The documentation is in Russian; this is
 
 **Requirements:** Windows 10/11; access to api.nuget.org on first setup; Claude Code; for Codex jobs
 the Codex CLI signed in; for another Claude, one more Claude account (or several). The Codex limits script
-(`codex_usage.py`) is an external dependency — without it limit checks report `unknown`.
+(`codex_usage.py`) comes from the companion repository
+[AI-Codex-Tools](https://github.com/Valerii-Hrymalskyi/AI-Codex-Tools) — clone it next to this one;
+without it Codex limit checks report `unknown`.
 
 **Setup** (the clone can live anywhere, `<clone>` below):
 
@@ -112,3 +115,5 @@ your full Windows user rights (`shell=false` limits it to file edits; `git push`
 Background jobs keep running after the Claude session closes. Two write jobs in overlapping folders
 are not blocked, only flagged with a `warning`. The end-to-end smoke tests spend real quota; the
 offline tests (`unit_test.py`, `verify_usage_guard.py`) do not and run in CI.
+
+License: MIT.

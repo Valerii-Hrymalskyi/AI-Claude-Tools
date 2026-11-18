@@ -8,12 +8,14 @@
     1. Downloads the official NuGet package "python" of the pinned version from api.nuget.org.
     2. Refuses it unless its SHA-256 matches the one pinned below.
     3. Unpacks it into Utils\Bin\Windows\Python3 (not in git).
-    4. Installs the exact package set from python-requirements.txt.
+    4. Installs the exact package set from python-requirements.txt (nothing, if it lists none).
 
     Idempotent: when the right version is already there, only step 4 runs, and pip finds
-    everything satisfied. A different version is replaced; a Python that is in use (a Claude
-    session, the task-delegator MCP server) cannot be, and the script says so instead of
-    leaving a half-deleted install behind.
+    everything satisfied. A different version is replaced; a Python that is in use (a running
+    session, hook or server started from it) cannot be, and the script says so - naming who
+    holds it - instead of leaving a half-deleted install behind.
+
+    The same script is used by AI-Claude-Tools and AI-Codex-Tools; keep the copies identical.
 
 .PARAMETER Destination
     Where to install. Default: Utils\Bin\Windows\Python3 next to this script.
@@ -88,7 +90,7 @@ else {
             # Printed once and plainly: a throw would repeat it inside PowerShell's error record.
             Write-Host "Cannot replace $Destination - it is in use:" -ForegroundColor Red
             $lines | ForEach-Object { Write-Host $_ }
-            Write-Host "Close them (Claude sessions with its hooks, the task-delegator MCP server) and run again." -ForegroundColor Red
+            Write-Host "Close them (see 'started by' above: sessions, hooks or servers using this Python) and run again." -ForegroundColor Red
             exit 1
         }
         Write-Host "Replacing Python $installed with $Version"
@@ -143,8 +145,16 @@ else {
     Write-Host "Installed Python $Version"
 }
 
-Write-Host "Installing packages from $(Split-Path $Requirements -Leaf)"
-& $python -m pip install --disable-pip-version-check --no-warn-script-location -q -r $Requirements
-if ($LASTEXITCODE -ne 0) { throw "pip install failed with exit code $LASTEXITCODE" }
+# pip refuses a requirements file without requirements, so a list of none is skipped.
+$wanted = @(Get-Content $Requirements -ErrorAction SilentlyContinue |
+    Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })
+if ($wanted.Count -eq 0) {
+    Write-Host "No packages to install: $(Split-Path $Requirements -Leaf) lists none"
+}
+else {
+    Write-Host "Installing packages from $(Split-Path $Requirements -Leaf)"
+    & $python -m pip install --disable-pip-version-check --no-warn-script-location -q -r $Requirements
+    if ($LASTEXITCODE -ne 0) { throw "pip install failed with exit code $LASTEXITCODE" }
+}
 
 Write-Host "Ready: $python"

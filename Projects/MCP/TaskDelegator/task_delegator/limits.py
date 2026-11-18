@@ -1,13 +1,13 @@
 """Codex rate limits: read them via the shared usage script and judge them against thresholds.
 
-The reader is an external script, `codex_usage.py`, that also feeds Codex's own Stop hook; it is
-not part of this repository (contract: docs/codex-usage-requirements.md). We call it as a
+The reader is an external script, `codex_usage.py` from the AI-Codex-Tools repository, that also
+feeds Codex's own Stop hook (contract: docs/codex-usage-requirements.md). We call it as a
 subprocess and rely only on its documented contract: `--json` prints schema-1 JSON on stdout,
 exit code 0 = success, anything else = unavailable (reason on stderr).
 
-Where it is: TASK_DELEGATOR_CODEX_USAGE_SCRIPT, otherwise the author's layout, a `Codex`
-workspace next to this clone (`<clone>\\..\\Codex\\Utils\\Scritps\\GetUsage\\codex_usage.py`;
-"Scritps" is the real folder name there). Without it every check is "unknown".
+Where it is: TASK_DELEGATOR_CODEX_USAGE_SCRIPT, otherwise AI-Codex-Tools cloned next to this
+clone, as `AI-Codex-Tools` or `Codex` (`<clone>\\..\\<that>\\Projects\\GetUsage\\codex_usage.py`).
+Without it every check is "unknown".
 """
 
 from __future__ import annotations
@@ -24,7 +24,10 @@ from . import procs
 
 # <clone>/Projects/MCP/TaskDelegator/task_delegator/limits.py -> parents[4] is the clone root.
 _CLONE_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_USAGE_SCRIPT = str(_CLONE_ROOT.parent / "Codex" / "Utils" / "Scritps" / "GetUsage" / "codex_usage.py")
+# AI-Codex-Tools cloned next to this clone: under its repository name, or as "Codex" (the author's layout).
+_USAGE_CANDIDATES = [_CLONE_ROOT.parent / name / "Projects" / "GetUsage" / "codex_usage.py"
+                     for name in ("AI-Codex-Tools", "Codex")]
+DEFAULT_USAGE_SCRIPT = str(next((p for p in _USAGE_CANDIDATES if p.is_file()), _USAGE_CANDIDATES[0]))
 SUPPORTED_SCHEMA = 1
 SCRIPT_TIMEOUT_SEC = 20          # passed to the script (its app-server timeout)
 SUBPROCESS_TIMEOUT_SEC = 45      # hard cap on the whole script run

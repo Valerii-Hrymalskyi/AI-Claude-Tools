@@ -1,7 +1,8 @@
 # Скрипт лимитов Codex: требования
 
-> Это техническое задание, по которому автор написал свой `codex_usage.py`; сам скрипт в этот
-> репозиторий не входит. Пути `E:\Development\AI\...` ниже — с машины автора. Для своего скрипта
+> Это техническое задание, по которому автор написал свой `codex_usage.py`; сам скрипт лежит в
+> отдельном репозитории [AI-Codex-Tools](https://github.com/Valerii-Hrymalskyi/AI-Codex-Tools),
+> `Projects/GetUsage`. Пути `E:\Development\AI\...` ниже — с машины автора. Для своего скрипта
 > важен контракт: `--json`, `schema: 1`, коды выхода и чистый stdout (разделы ниже). Путь к нему
 > задаётся в `TASK_DELEGATOR_CODEX_USAGE_SCRIPT`.
 
@@ -22,7 +23,7 @@
 
 ## Расположение и среда
 
-- Папка: `E:\Development\AI\Codex\Utils\Scritps\GetUsage`.
+- Папка: `E:\Development\AI\Codex\Projects\GetUsage` (клон AI-Codex-Tools).
 - Файлы:
   - `codex_usage.py` — всё в одном файле: и модуль, и CLI;
   - `test_codex_usage.py` — тесты;
