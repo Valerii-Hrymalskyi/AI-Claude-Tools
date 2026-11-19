@@ -55,9 +55,24 @@ def job_dir(job_id: str) -> Path:
 
 
 def write_json(path: Path, data: Any) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    """Atomic write. Safe when several threads write or read the same file at once."""
+    # A temp name per writer: two threads writing one file must not share (and steal) one temp file.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            # Windows refuses to replace a file another thread or process holds open for a moment
+            # (a concurrent read_json, an antivirus scan): WinError 5 / 32. Wait and retry.
+            if attempt == 9:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.02 * (attempt + 1))
 
 
 def read_json(path: Path, default: Any = None) -> Any:

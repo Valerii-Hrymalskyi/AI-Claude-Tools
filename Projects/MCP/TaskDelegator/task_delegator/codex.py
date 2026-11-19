@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -360,11 +361,20 @@ def _take_after_reading(meta: dict, d: Path) -> dict:
     return rec
 
 
+# One "after" reading per job: the exit hook (watcher thread) and the first look at a just-finished
+# job (task_wait in another thread) race for it. Whoever comes second uses the first one's file.
+_AFTER_READING_LOCK = threading.Lock()
+
+
 def capture_limits_after(job_id: str) -> None:
     """jobs.launch on_exit hook: record the limits right when Codex exits."""
     d = jobs.job_dir(job_id)
     meta = jobs.load_meta(job_id)
-    if meta.get("limits_before") and not (d / "limits_after.json").exists():
+    if not meta.get("limits_before"):
+        return
+    with _AFTER_READING_LOCK:
+        if (d / "limits_after.json").exists():
+            return
         try:
             _take_after_reading(meta, d)
         except limits.LimitsUnavailable:
@@ -393,10 +403,13 @@ def limits_cost(meta: dict, d: Path) -> dict | None:
             return {"cost": "unknown",
                     "note": "no limits reading was taken when the job ended; a reading now would "
                             "include later Codex use"}
-        try:
-            rec = _take_after_reading(meta, d)
-        except limits.LimitsUnavailable as e:
-            return {"cost": "unknown", "error": str(e)}
+        with _AFTER_READING_LOCK:
+            rec = jobs.read_json(d / "limits_after.json")  # the exit hook may have just taken it
+            if rec is None:
+                try:
+                    rec = _take_after_reading(meta, d)
+                except limits.LimitsUnavailable as e:
+                    return {"cost": "unknown", "error": str(e)}
     return {
         "cost": limits.cost(before, rec["snapshot"]),
         "after": rec["summary"],

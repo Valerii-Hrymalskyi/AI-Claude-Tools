@@ -457,6 +457,82 @@ fake(exit=1, stderr="must not be called")
 lc = codex.limits_cost(jobs.load_meta(jid), d)
 check(lc and lc["cost"] == {"5h": "+4%", "7d": "+1%"}, "limits_cost uses the reading taken at exit", lc)
 
+# --- the exit hook and the first look race for the after-reading (CI, 2026-11-19) ----------
+import threading as _threading  # noqa: E402
+
+race_reads: list[int] = []
+
+
+def slow_read(exe=None, env=None):
+    race_reads.append(1)
+    _time.sleep(0.3)  # the usage script takes a while: long enough for the other thread to arrive
+    return usage_json(15, 21)
+
+
+race_job = fake_job({"pid": dead2.pid, "pid_created": 1, "image": "x.exe",
+                     "limits_before": limits.snapshot(usage_json(10, 20))}, done_events,
+                    {"exit_code": 0, "finished_at": jobs.now_iso()})
+race_dir = jobs.job_dir(race_job)
+race_errors: list[BaseException] = []
+race_costs: list[dict] = []
+
+
+def race_hook():
+    try:
+        codex.capture_limits_after(race_job)
+    except BaseException as e:  # noqa: BLE001
+        race_errors.append(e)
+
+
+def race_look():
+    try:
+        race_costs.append(codex.limits_cost(jobs.load_meta(race_job), race_dir))
+    except BaseException as e:  # noqa: BLE001
+        race_errors.append(e)
+
+
+with mock.patch.object(limits, "read", slow_read):
+    threads = [_threading.Thread(target=race_hook)] + [_threading.Thread(target=race_look) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+check(not race_errors and len(race_reads) == 1 and len(race_costs) == 3
+      and all(c["cost"] == {"5h": "+5%", "7d": "+1%"} for c in race_costs),
+      "the exit hook and concurrent first looks share one after-reading, no file clash",
+      (race_errors, len(race_reads), race_costs))
+
+# write_json survives many writers and readers on one file at once
+clash = STATE / "clash.json"
+clash_errors: list[BaseException] = []
+
+
+def clash_writer(n: int):
+    try:
+        for i in range(50):
+            jobs.write_json(clash, {"writer": n, "i": i})
+    except BaseException as e:  # noqa: BLE001
+        clash_errors.append(e)
+
+
+def clash_reader():
+    try:
+        for _ in range(200):
+            jobs.read_json(clash)
+    except BaseException as e:  # noqa: BLE001
+        clash_errors.append(e)
+
+
+clash_threads = [_threading.Thread(target=clash_writer, args=(n,)) for n in range(4)] + \
+                [_threading.Thread(target=clash_reader) for _ in range(2)]
+for t in clash_threads:
+    t.start()
+for t in clash_threads:
+    t.join(60)
+leftovers = [p.name for p in STATE.glob("clash.json.*.tmp")]
+check(not clash_errors and isinstance(jobs.read_json(clash), dict) and not leftovers,
+      "write_json: concurrent writers and readers of one file never clash", (clash_errors, leftovers))
+
 # --- a late first look does not attribute later usage to the job ----------------------
 fake(json.dumps(usage_json(60, 30)))
 late = fake_job({"pid": dead2.pid, "pid_created": 1, "image": "x.exe",
