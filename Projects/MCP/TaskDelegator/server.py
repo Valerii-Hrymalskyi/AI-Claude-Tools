@@ -233,11 +233,12 @@ def _limits_gate(agent: agents.Agent, exe: str, ignore_limits: bool) -> tuple[di
 
     Fails open: when the limits cannot be read the job still starts, and the caller is told.
     """
-    verdict, snapshot = _adapter(agent).limits(agent, exe)
+    try:
+        verdict, snapshot = agents.read_limits(agent, exe)
+    except limits.LimitsUnavailable as e:
+        return {"state": "unknown", "note": f"limits unavailable: {e}; started without a check"}, None
     state = verdict.get("state", "unknown")
-    if state == "unknown":
-        return {"state": "unknown", "note": f"{verdict.get('note') or 'limits unknown'}; started without a check"}, None
-    info = {"state": state, "summary": verdict.get("summary")}
+    info = {"state": state, "summary": verdict.get("summary"), "source": verdict.get("source")}
     if verdict.get("reasons"):
         info["reasons"] = verdict["reasons"]
     if state == "pause":
@@ -378,7 +379,10 @@ def _agent_card(agent: agents.Agent) -> dict:
                         "options": defaults_options}
     card["options"] = {k: desc for k, (_d, desc) in ad.OPTIONS.items()}
     if exe:
-        verdict, _snapshot = ad.limits(agent, exe)
+        try:
+            verdict, _snapshot = agents.read_limits(agent, exe)
+        except limits.LimitsUnavailable as e:
+            verdict = {"state": "unknown", "note": f"limits unavailable: {e}"}
         card["limits"] = {k: verdict[k] for k in ("state", "summary", "reasons", "resume_after", "note", "source")
                           if verdict.get(k)}
     return card

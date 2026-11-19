@@ -34,7 +34,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import jobs
+from . import jobs, limits
 
 _ACCOUNT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 # Setting -> expected JSON type. A value of the wrong type is reported and ignored.
@@ -65,11 +65,12 @@ class Adapter(Protocol):
     OPTIONS: dict[str, tuple[Any, str]]      # option -> (default, description)
     DEFAULT_MAX_JOBS: int
     HAS_DEFAULT_ACCOUNT: bool                # codex: yes (~/.codex); claude: no (that is the lead)
+    TRACKS_COST: bool                        # readings before/after a job give its cost (codex)
 
     def find_exe(self) -> tuple[str | None, str]: ...
     def doctor(self, agent: Agent, exe: str) -> dict: ...
     def validate(self, agent: Agent, model: str | None, effort: str | None) -> str | None: ...
-    def limits(self, agent: Agent, exe: str) -> tuple[dict, dict | None]: ...
+    def read_usage(self, agent: Agent, exe: str, timeout: float | None = None) -> tuple[dict, str]: ...
     def build(self, agent: Agent, exe: str, job_dir: Path, meta: dict) -> tuple[list[str], dict, Any]: ...
     def job_status(self, job_id: str) -> tuple[str, dict, dict]: ...
     def job_view(self, job_id: str, detail: str = "full") -> dict: ...
@@ -191,3 +192,25 @@ def get(agent_id: str) -> Agent:
 def adapter_for(provider: str) -> Adapter:
     """The adapter of a job's provider tag (job.json "provider"); KeyError if unknown."""
     return load_kinds()[LEGACY_PROVIDERS.get(provider, provider)]
+
+
+def read_limits(agent: Agent, exe: str | None = None, timeout: float | None = None) -> tuple[dict, dict | None]:
+    """An agent's limits: (verdict, snapshot). The same for every kind of agent.
+
+    Each adapter's read_usage() returns its source's numbers in one shape - schema 1 of the Codex
+    usage-script contract (docs/codex-usage-requirements.md): buckets of windows, each with a label,
+    a kind (primary = the short window, secondary = the weekly one), used_percent and its reset
+    time, plus an optional limit_reached flag. A kind whose source publishes other windows converts
+    them there; the verdict (limits.evaluate), the start gate, list_agents() and
+    scripts/team_limits.py need no kind-specific code. The snapshot (for a job's limits_cost) is
+    returned only by kinds that track cost. Raises limits.LimitsUnavailable with the reason.
+    """
+    ad = load_kinds()[agent.kind]
+    if exe is None:
+        exe, how = ad.find_exe()
+        if not exe:
+            raise limits.LimitsUnavailable(f"{agent.kind} CLI not found ({how})")
+    usage, source = ad.read_usage(agent, exe, timeout)
+    verdict = limits.evaluate(usage)
+    verdict["source"] = source
+    return verdict, (limits.snapshot(usage) if getattr(ad, "TRACKS_COST", False) else None)

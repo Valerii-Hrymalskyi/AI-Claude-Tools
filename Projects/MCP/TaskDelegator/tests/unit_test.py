@@ -59,6 +59,9 @@ os.environ.update({
     "TASK_DELEGATOR_AGENTS_FILE": str(AGENTS_FILE),
     "TASK_DELEGATOR_CODEX_EXE": str(FAKE_CODEX),
     "TASK_DELEGATOR_CLAUDE_EXE": str(FAKE_CLAUDE),
+    # Claude accounts are read through the rate_limit_event of their jobs unless a test supplies a
+    # fake UsageGuard: the real one must never be run against the test accounts.
+    "TASK_DELEGATOR_USAGE_GUARD": str(STATE / "no-usage-guard.py"),
     "CODEX_HOME": str(DEFAULT_CODEX_HOME),
     "FAKE_CODEX_CALLS": str(STATE / "codex.calls"),
     "PYTHONDONTWRITEBYTECODE": "1",
@@ -1083,6 +1086,178 @@ try:
 finally:
     old_proc.kill()
     old_proc.wait()
+
+# --- team_limits.py: the subordinates' limits for the lead's Stop hook ---------------------
+sys.path.insert(0, str(ROOT / "scripts"))
+import team_limits  # noqa: E402
+
+TL_DIR = Path(tempfile.mkdtemp(prefix="task-delegator-team-"))
+fake_guard = TL_DIR / "fake_guard.py"
+fake_guard.write_text(
+    "import json, os\n"
+    "home = os.environ.get('CLAUDE_CONFIG_DIR', '')\n"
+    "pct = 99.0 if home.endswith('limited') else 12.0\n"
+    "print(json.dumps({'ok': True, 'source': 'server', 'live_pct': pct, 'seven_day_pct': 30.0,\n"
+    "                  'reset_at': '2099-01-01 05:00:00', 'weekly_reset_at': '2099-01-03 05:00:00',\n"
+    "                  'verdict': 'pause' if pct >= 95 else 'ok'}))\n", encoding="utf-8")
+os.environ["TASK_DELEGATOR_USAGE_GUARD"] = str(fake_guard)
+os.environ["TASK_DELEGATOR_TEAM_LIMITS_CACHE"] = str(TL_DIR / "cache.json")
+fake(json.dumps(usage_json(10, 20)))
+tl_rows = {r["agent"]: r for r in team_limits.team(fresh=True)}
+check(set(tl_rows) == set(agents.discover()[0]), "team_limits lists every agent", sorted(tl_rows))
+check(tl_rows["claude:limited"]["state"] == "pause" and tl_rows["claude:limited"]["windows"][0]["used"] == 99.0
+      and tl_rows["claude:limited"]["source"] == "measured"
+      and tl_rows["claude:test"]["state"] == "ok", "team_limits reads Claude accounts through UsageGuard", tl_rows)
+check(tl_rows["codex"]["state"] == "ok" and [w["used"] for w in tl_rows["codex"]["windows"]] == [10, 20],
+      "team_limits reads Codex through its usage script", tl_rows["codex"])
+# The adapter layer: UsageGuard's JSON becomes schema 1, and the start gate uses it.
+g_now = _time.time()
+g_usage = claude.usage_from_guard({"live_pct": 97.0, "seven_day_pct": 40.0, "reset_at": "2099-01-01 05:00:00",
+                                   "weekly_reset_at": "2099-01-03 05:00:00", "probe_status_5h": "rejected"}, g_now)
+g_verdict = limits.evaluate(g_usage)
+check(g_verdict["state"] == "pause" and g_usage["buckets"][0].get("limit_reached")
+      and [w["label"] for w in g_usage["buckets"][0]["windows"]] == ["5h", "7d"] and g_verdict.get("resume_after"),
+      "UsageGuard's JSON converts to schema 1 (windows, rejected flag, reset times)", g_verdict)
+try:
+    server._limits_gate(found["claude:limited"], str(FAKE_CLAUDE), False)
+    check(False, "the start gate of a Claude account uses UsageGuard's measurement")
+except server.ToolError as e:
+    check("99%" in str(e), "the start gate of a Claude account uses UsageGuard's measurement", e)
+g_info, _ = server._limits_gate(found["claude:test"], str(FAKE_CLAUDE), False)
+check(g_info["state"] == "ok" and g_info.get("source") == "measured", "an ok measurement says where it came from", g_info)
+
+
+# A kind nobody wrote team_limits code for: its adapter's read_usage is all it takes.
+class _KimiAdapter:
+    kind = "kimi"
+    TRACKS_COST = False
+
+    @staticmethod
+    def find_exe():
+        return "kimi.exe", "test"
+
+    @staticmethod
+    def read_usage(agent, exe, timeout=None):
+        return ({"schema": 1, "buckets": [{"id": "kimi", "name": "kimi", "windows": [
+            {"kind": "primary", "label": "day", "used_percent": 42.0, "resets_at_unix": _time.time() + 3600,
+             "resets_at": _dt.now().astimezone().isoformat()}]}]}, "kimi meter")
+
+
+agents.KINDS["kimi"] = _KimiAdapter()
+try:
+    kimi_row = team_limits.read_agent(agents.Agent("kimi:x", "kimi", "x", str(TL_DIR)))
+finally:
+    agents.KINDS.pop("kimi", None)
+check(kimi_row["state"] == "ok" and kimi_row["windows"][0]["label"] == "day" and kimi_row["windows"][0]["used"] == 42.0
+      and kimi_row["source"] == "kimi meter", "a new kind with other windows reaches team_limits through its adapter only",
+      kimi_row)
+# Review 2026-11-19: a stale UsageGuard figure must not hide a newer refusal in the account's last job.
+rejected_rl = {"unifiedWindows": {"five_hour": {"utilization": 0.5, "resetsAt": g_now + 3600, "status": "rejected"},
+                                  "seven_day": {"utilization": 0.2, "resetsAt": g_now + 86400, "status": "allowed"}}}
+with mock.patch.object(claude, "last_rate_limits", return_value=(rejected_rl, jobs.now_iso(), "claude-job-x")):
+    m_usage, m_source = claude.read_usage(found["claude:test"])  # the fake UsageGuard says 12 %, ok
+m_verdict = limits.evaluate(m_usage)
+check(m_verdict["state"] == "pause" and "worse in its last job" in m_source,
+      "the worse of UsageGuard and the last job wins (a refusal is not hidden)", (m_verdict, m_source))
+older = limits.evaluate(claude.merge_usage(
+    claude.usage_from_guard({"live_pct": 80.0, "seven_day_pct": 10.0, "reset_at": "2099-01-01 05:00:00"}, g_now),
+    claude.usage_from_rate_limits({"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": g_now + 60}}},
+                                  None, g_now)))
+check([w["used_percent"] for w in older["windows"]][:1] == [80.0], "a lower job figure does not lower the measurement",
+      older)
+check(claude.usage_from_guard({"source": "server", "probe_age_sec": 3600, "live_pct": 1}, g_now)["measured_at"]
+      < claude.usage_from_guard({"source": "server", "probe_age_sec": 0, "live_pct": 1}, g_now)["measured_at"],
+      "a cached probe keeps its own time, not now")
+tl_found = agents.discover()[0]
+with mock.patch.dict(os.environ, {"CODEX_HOME": str(TL_DIR / "codex-a")}):
+    key_a = team_limits._team_key(tl_found)
+with mock.patch.dict(os.environ, {"CODEX_HOME": str(TL_DIR / "codex-b")}):
+    key_b = team_limits._team_key(tl_found)
+check(key_a != key_b, "the team cache key follows the default account's home (CODEX_HOME)")
+layout = team_limits.format_rows([
+    {"name": "Long Name (Claude Pro)", "state": "pause",
+     "windows": [{"label": "5h", "used": 99.0, "reset": "2026-11-19 05:00:00"},
+                 {"label": "7d", "used": 36.0, "reset": "2026-11-22 05:00:00"}]},
+    {"name": "y", "state": "ok", "windows": [{"label": "5h", "used": 9.0, "reset": "2026-11-19 06:03:00"}]},
+    {"name": "z", "state": "unknown", "error": "no data"},
+]).splitlines()
+check(layout == ["Team limits:", "Long Name (Claude Pro) — PAUSE:", "5h: 99.0%, R: 2026-11-19 05:00:00",
+                 "7d: 36.0%, R: 2026-11-22 05:00:00", "y:", "5h: 9.0%, R: 2026-11-19 06:03:00", "z: ? (no data)"],
+      "team limits use the layout of the Limits block: a name line, then one line per window", "\n".join(layout))
+tl_text = team_limits.format_rows(list(tl_rows.values()))
+check(tl_text.startswith("Team limits:") and "PAUSE" in tl_text and "5h: 99.0%, R: 2099-01-01 05:00:00" in tl_text,
+      "team_limits formats every agent and flags a pause", tl_text)
+fake_guard.write_text("raise SystemExit(1)\n", encoding="utf-8")
+check(team_limits.team()[0] == list(tl_rows.values())[0], "team_limits reuses its cache within CACHE_SEC")
+os.environ["TASK_DELEGATOR_USAGE_GUARD"] = str(TL_DIR / "missing.py")
+tl_fallback = {r["agent"]: r for r in team_limits.team(fresh=True)}
+check(tl_fallback["claude:limited"]["windows"] and "last job" in tl_fallback["claude:limited"]["source"]
+      and tl_fallback["claude:test"]["state"] == "unknown" and tl_fallback["claude:test"].get("error"),
+      "without UsageGuard: the newest rate_limit_event, or unknown with a reason",
+      (tl_fallback["claude:limited"], tl_fallback["claude:test"]))
+tl_hook = subprocess.run([sys.executable, str(ROOT / "scripts" / "team_limits.py"), "--hook", "claude-stop"],
+                         input="{}", capture_output=True, text=True, encoding="utf-8", timeout=60)
+try:
+    tl_msg = json.loads(tl_hook.stdout)["systemMessage"]
+except (ValueError, KeyError):
+    tl_msg = ""
+check(tl_hook.returncode == 0 and tl_msg.startswith("Team limits:"), "the Stop hook prints a systemMessage",
+      (tl_hook.returncode, tl_hook.stdout[-300:], tl_hook.stderr[-300:]))
+tl_cache = json.loads((TL_DIR / "cache.json").read_text(encoding="utf-8"))
+tl_cache["key"] = "rows of another agents.json"
+(TL_DIR / "cache.json").write_text(json.dumps(tl_cache), encoding="utf-8")
+os.environ["TASK_DELEGATOR_USAGE_GUARD"] = str(fake_guard)
+fake_guard.write_text("raise SystemExit(1)\n", encoding="utf-8")
+with mock.patch.object(team_limits, "read_team", return_value=[{"agent": "re-read"}]) as tl_reread:
+    tl_got = team_limits.team()
+check(tl_reread.called and tl_got == [{"agent": "re-read"}],
+      "team_limits ignores cached rows that belong to another set of agents", tl_got)
+# The hook must not wait for its stdin to close.
+tl_open = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "team_limits.py"), "--hook", "claude-stop"],
+                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    tl_open.wait(timeout=60)
+    tl_open_ok = tl_open.returncode == 0 and b"Team limits" in tl_open.stdout.read()
+except subprocess.TimeoutExpired:
+    tl_open.kill()
+    tl_open_ok = False
+finally:
+    tl_open.stdin.close()
+check(tl_open_ok, "the Stop hook finishes even if its stdin is never closed")
+# A timeout kills the whole process tree (the usage script's codex app-server must not be orphaned).
+tree_pid_file = TL_DIR / "grandchild.pid"
+tree_script = TL_DIR / "tree.py"
+tree_script.write_text(
+    "import subprocess, sys, time, pathlib\n"
+    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+    f"pathlib.Path(r'{tree_pid_file}').write_text(str(p.pid))\n"
+    "time.sleep(120)\n", encoding="utf-8")
+try:
+    procs.run_capture([sys.executable, str(tree_script)], 3)
+    tree_timed_out = False
+except subprocess.TimeoutExpired:
+    tree_timed_out = True
+_time.sleep(1)
+grandchild = int(tree_pid_file.read_text()) if tree_pid_file.exists() else None
+check(tree_timed_out and grandchild and not procs.pid_alive(grandchild, None, None),
+      "run_capture: a timeout kills the child and its own children", grandchild)
+
+tl_cfg = TL_DIR / "account"
+tl_cfg.mkdir()
+guard_hook = {"hooks": [{"type": "command", "command": "py", "args": ["usage_guard.py", "-mode", "stop"]}]}
+(tl_cfg / "settings.json").write_text(json.dumps({"model": "x", "hooks": {"Stop": [guard_hook]}}), encoding="utf-8")
+with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(tl_cfg)}):
+    team_limits.install_hook()
+    team_limits.install_hook()
+    tl_set = json.loads((tl_cfg / "settings.json").read_text(encoding="utf-8"))
+    check(tl_set["model"] == "x" and len(tl_set["hooks"]["Stop"]) == 2 and tl_set["hooks"]["Stop"][0] == guard_hook
+          and "team_limits.py" in json.dumps(tl_set["hooks"]["Stop"][1])
+          and (tl_cfg / "settings.json.bak-team-limits").exists(),
+          "--install-hook adds one Stop hook next to the existing ones (twice = once), with a backup", tl_set)
+    team_limits.uninstall_hook()
+    tl_set = json.loads((tl_cfg / "settings.json").read_text(encoding="utf-8"))
+    check(tl_set["hooks"]["Stop"] == [guard_hook] and tl_set["model"] == "x",
+          "--uninstall-hook removes only its own hook", tl_set)
 
 print(f"\nRESULT: {checks} checks:", "ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}")
 sys.exit(1 if failures else 0)

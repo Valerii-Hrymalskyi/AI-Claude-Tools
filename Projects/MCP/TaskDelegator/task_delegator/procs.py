@@ -92,6 +92,34 @@ def pid_alive(pid: int | None, expect_image: str | None = None, created: int | N
         _k32.CloseHandle(handle)
 
 
+def run_capture(argv: list[str], timeout: float, env: dict[str, str] | None = None,
+                text: bool = False) -> subprocess.CompletedProcess:
+    """Like subprocess.run(capture_output=True, timeout=...), but a timeout kills the whole tree.
+
+    subprocess.run kills only the direct child: a script that started a process of its own (the
+    Codex usage script drives `codex app-server`) would leave that one running. Raises
+    subprocess.TimeoutExpired after the tree is gone.
+    """
+    kw: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "stdin": subprocess.DEVNULL, "env": env}
+    if IS_WINDOWS:
+        kw["creationflags"] = CREATE_NO_WINDOW
+    else:
+        kw["start_new_session"] = True  # its own process group, so kill_tree takes the children too
+    if text:
+        kw.update(text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(argv, **kw)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc.pid)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def kill_tree(pid: int) -> tuple[bool, str]:
     """Kill a process and all its children. Returns (ok, message)."""
     if IS_WINDOWS:

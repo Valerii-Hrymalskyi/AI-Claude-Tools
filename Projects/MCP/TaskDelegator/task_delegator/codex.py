@@ -539,6 +539,7 @@ class _Adapter:
     TERMINAL = TERMINAL
     DEFAULT_MAX_JOBS = 3
     HAS_DEFAULT_ACCOUNT = True
+    TRACKS_COST = True  # a reading before and after a job gives limits_cost
     OPTIONS: dict[str, tuple[Any, str]] = {
         "web_search": (False, "let Codex search the live web (docs, release notes, error messages); "
                               "works in read-only mode too. Its shell has no network either way."),
@@ -569,13 +570,10 @@ class _Adapter:
         return None
 
     @staticmethod
-    def limits(agent: agents.Agent, exe: str) -> tuple[dict, dict | None]:
-        """Fails open: if the usage script is unavailable the state is "unknown"."""
-        try:
-            usage = limits.read(exe, env=home_env(agent.home))
-        except limits.LimitsUnavailable as e:
-            return {"state": "unknown", "note": f"limits unavailable: {e}"}, None
-        return limits.evaluate(usage), limits.snapshot(usage)
+    def read_usage(agent: agents.Agent, exe: str, timeout: float | None = None) -> tuple[dict, str]:
+        """The usage script already speaks schema 1. Raises limits.LimitsUnavailable."""
+        kw = {} if timeout is None else {"script_timeout": timeout}
+        return limits.read(exe, env=home_env(agent.home), **kw), "Codex usage script"
 
     @staticmethod
     def build(agent: agents.Agent, exe: str, d: Path, meta: dict) -> tuple[list[str], dict, Any]:

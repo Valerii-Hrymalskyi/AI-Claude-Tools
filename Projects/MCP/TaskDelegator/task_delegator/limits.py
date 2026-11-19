@@ -65,24 +65,26 @@ def thresholds() -> dict[str, dict[str, float]]:
     return out
 
 
-def read(codex_exe: str | None = None, env: dict[str, str] | None = None) -> dict:
+def read(codex_exe: str | None = None, env: dict[str, str] | None = None,
+         script_timeout: float = SCRIPT_TIMEOUT_SEC) -> dict:
     """Run the usage script and return its schema-1 JSON. Raises LimitsUnavailable.
 
     env: the environment for the script (e.g. with CODEX_HOME of another account); None = inherit.
+    script_timeout: the script's own app-server timeout; the whole run is capped a little above it
+    (a hook passes a short one so that it never holds up a turn).
     """
     script = usage_script()
     if not Path(script).is_file():
         raise LimitsUnavailable(f"usage script not found: {script} (set TASK_DELEGATOR_CODEX_USAGE_SCRIPT)")
-    argv = [sys.executable, script, "--json", "--timeout", str(SCRIPT_TIMEOUT_SEC)]
+    argv = [sys.executable, script, "--json", "--timeout", f"{script_timeout:g}"]
     if codex_exe:
         argv += ["--codex-exe", codex_exe]
+    cap = SUBPROCESS_TIMEOUT_SEC if script_timeout >= SCRIPT_TIMEOUT_SEC else script_timeout + 5
     try:
-        r = subprocess.run(
-            argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=SUBPROCESS_TIMEOUT_SEC, env=env,
-            creationflags=procs.CREATE_NO_WINDOW if procs.IS_WINDOWS else 0,
-        )
+        # A timeout kills the whole tree: the script's own codex app-server must not be left behind.
+        r = procs.run_capture(argv, cap, env=env)
     except subprocess.TimeoutExpired as e:
-        raise LimitsUnavailable(f"usage script did not finish within {SUBPROCESS_TIMEOUT_SEC} s") from e
+        raise LimitsUnavailable(f"usage script did not finish within {cap:g} s") from e
     except OSError as e:
         raise LimitsUnavailable(f"could not run usage script: {e}") from e
     stderr = r.stderr.decode("utf-8", "replace").strip()

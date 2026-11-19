@@ -14,12 +14,17 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from . import agents, jobs, limits, procs
+
+# <clone>/Projects/MCP/TaskDelegator/task_delegator/claude.py -> parents[4] is the clone root.
+_CLONE_ROOT = Path(__file__).resolve().parents[4]
+GUARD_TIMEOUT_SEC = 10
 
 PROVIDER = "claude"
 EXE_NAME = "claude.exe" if os.name == "nt" else "claude"
@@ -200,6 +205,119 @@ def parse_events(path: Path) -> dict:
 
 
 # --------------------------------------------------------------------------- limits
+#
+# Two sources, converted to schema 1 (agents.read_limits): UsageGuard, which asks the server for the
+# account when its folder holds a usage-limits-token (measured; one tiny request, cached 20-90 s), and,
+# without it, the newest rate_limit_event of the account's own jobs (free, as fresh as its last job).
+
+
+def usage_guard_script() -> Path:
+    return Path(os.environ.get("TASK_DELEGATOR_USAGE_GUARD")
+                or _CLONE_ROOT / "Projects" / "UsageGuard" / "usage_guard.py")
+
+
+def _local_ts(value: Any) -> float | None:
+    """UsageGuard's "YYYY-mm-dd HH:MM:SS" local time as a unix time."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").timestamp()
+    except ValueError:
+        return None
+
+
+def usage_from_guard(d: dict, now: float | None = None) -> dict:
+    """UsageGuard's `-mode json` for one account, in schema 1."""
+    now = time.time() if now is None else now
+    windows, reached = [], None
+    for pct_key, reset_key, status_key, kind, label in (
+            ("live_pct", "reset_at", "probe_status_5h", "primary", "5h"),
+            ("seven_day_pct", "weekly_reset_at", "probe_status_7d", "secondary", "7d")):
+        ts = _local_ts(d.get(reset_key))
+        used = d.get(pct_key)
+        windows.append({
+            "kind": kind, "label": label,
+            "used_percent": float(used) if isinstance(used, (int, float)) else None,
+            "resets_at_unix": ts, "resets_in_sec": int(ts - now) if ts else None,
+            "resets_at": datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds") if ts else None,
+        })
+        if d.get(status_key) == "rejected":
+            reached = f"{label} window rejected the last request"
+    bucket: dict[str, Any] = {"id": "claude", "name": "claude", "windows": windows}
+    if reached:
+        bucket["limit_reached"] = reached
+    # A probe answered from UsageGuard's cache is as old as that cache, not "now".
+    age = d.get("probe_age_sec") if d.get("source") == "server" else None
+    taken = now - float(age) if isinstance(age, (int, float)) and age > 0 else now
+    measured = datetime.fromtimestamp(taken).astimezone().isoformat(timespec="seconds")
+    return {"schema": 1, "measured_at": measured, "buckets": [bucket]}
+
+
+def merge_usage(a: dict, b: dict) -> dict:
+    """The worse of two schema-1 readings of one account, window by window.
+
+    The sources can disagree for a while - a cached probe against a job that has just been
+    refused - and for a budget gate the pessimistic one is the safe one. A window that has reset
+    since a reading already reads 0 % in it (usage_from_rate_limits), so an old figure cannot block
+    a new window.
+    """
+    def windows(u: dict) -> dict[str, dict]:
+        return {w.get("kind"): w for bk in u.get("buckets") or [] for w in bk.get("windows") or []}
+
+    wa, wb = windows(a), windows(b)
+    merged = []
+    for kind in dict.fromkeys([*wa, *wb]):
+        x, y = wa.get(kind), wb.get(kind)
+        if x is None or y is None:
+            merged.append(x or y)
+            continue
+        ux, uy = x.get("used_percent"), y.get("used_percent")
+        worse_y = isinstance(uy, (int, float)) and (not isinstance(ux, (int, float)) or uy > ux)
+        merged.append(y if worse_y else x)
+    bucket: dict[str, Any] = {"id": "claude", "name": "claude", "windows": merged}
+    reached = [bk["limit_reached"] for u in (a, b) for bk in u.get("buckets") or [] if bk.get("limit_reached")]
+    if reached:
+        bucket["limit_reached"] = reached[0]
+    measured = max(a.get("measured_at") or "", b.get("measured_at") or "") or None
+    return {"schema": 1, "measured_at": measured, "buckets": [bucket]}
+
+
+def read_usage(agent: agents.Agent, timeout: float | None = None) -> tuple[dict, str]:
+    """The account's limits in schema 1 and where they came from. Raises limits.LimitsUnavailable.
+
+    UsageGuard (measured, or its estimate) and the newest rate_limit_event of the account's own
+    jobs are both read; when both exist, the worse figure of each window wins (merge_usage).
+    """
+    problem = guard_usage = guard_source = None
+    guard = usage_guard_script()
+    if guard.is_file():
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(agent.home)}
+        try:
+            r = procs.run_capture([sys.executable, str(guard), "-mode", "json"], timeout or GUARD_TIMEOUT_SEC,
+                                  env=env, text=True)
+            d = json.loads(r.stdout)
+            if isinstance(d, dict) and d.get("ok"):
+                guard_usage = usage_from_guard(d)
+                guard_source = "measured" if d.get("source") == "server" else "UsageGuard estimate"
+            else:
+                problem = "UsageGuard has no data for this account"
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            problem = f"UsageGuard: {type(e).__name__}"
+    rl, measured, jid = last_rate_limits(agent.id)
+    job_usage = usage_from_rate_limits(rl, measured) if rl is not None else None
+    job_source = f"its last job ({jid}, {(measured or '?')[11:16]})"
+    if guard_usage is None and job_usage is None:
+        raise limits.LimitsUnavailable("no recent job of this account to read its limits from"
+                                       + (f"; {problem}" if problem else ""))
+    if guard_usage is None:
+        return job_usage, job_source
+    if job_usage is None:
+        return guard_usage, guard_source
+    merged = merge_usage(guard_usage, job_usage)
+    if merged["buckets"][0] == guard_usage["buckets"][0]:
+        return merged, guard_source
+    return merged, f"{guard_source}, worse in {job_source}"
+
 
 # How many of this account's most recently written logs are parsed for a reading.
 _LIMITS_LOOKBACK_JOBS = 10
@@ -372,6 +490,7 @@ class _Adapter:
     TERMINAL = TERMINAL
     DEFAULT_MAX_JOBS = 2
     HAS_DEFAULT_ACCOUNT = False  # ~/.claude is the lead's own account
+    TRACKS_COST = False  # its result carries the account's rate_limits instead
     OPTIONS: dict[str, tuple[Any, str]] = {
         "shell": (True, "write mode: allow shell commands (Bash, with network, as the Windows user); "
                         "false = file edits only"),
@@ -408,13 +527,8 @@ class _Adapter:
         return None
 
     @staticmethod
-    def limits(agent: agents.Agent, exe: str) -> tuple[dict, dict | None]:
-        rl, measured, jid = last_rate_limits(agent.id)
-        if rl is None:
-            return {"state": "unknown", "note": "no recent job of this account to read its limits from"}, None
-        verdict = limits.evaluate(usage_from_rate_limits(rl, measured))
-        verdict["source"] = f"rate_limit_event of job {jid}"
-        return verdict, None
+    def read_usage(agent: agents.Agent, exe: str, timeout: float | None = None) -> tuple[dict, str]:
+        return read_usage(agent, timeout)
 
     @staticmethod
     def build(agent: agents.Agent, exe: str, d: Path, meta: dict) -> tuple[list[str], dict, Any]:
